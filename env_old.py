@@ -1,14 +1,24 @@
 # env.py
-# LEGO Lean Production Simulation Environment (Discrete-Event) with CONWIP (Pull)
+# LEGO Lean Production Simulation Environment (Discrete-Event)
 # --------------------------------------------------------------------------------------
+# This is a self-contained, dependency-light discrete-event simulation (DES) environment
+# for a lean-production LEGO line. It encodes BOTH the simulation engine and a default
+# environment configuration directly in this file — no Excel/JSON loading required.
+#
+# Key features
 # - Discrete-event engine using a priority queue (heapq)
 # - Entities: Buffer (inventory), Team (worker group), Stage (process node)
-# - Multi-input Stages (e.g., Final Assembly needs D1 + D2 + C3)
-# - Single or probabilistic output routing
+# - Multi-input Stage support (e.g., Final Assembly needs D1 + D2 + C3)
+# - Single-output buffer OR probabilistic output routing (e.g., Set Sorting -> C1/C2/C3)
 # - Shift schedules (optional), random disruptions, defects & rework
 # - Time distributions: constant, normal, lognormal, triangular, uniform, exponential
 # - KPIs: throughput/sec, average lead time, average WIP, team utilization, finished count
-# - CONWIP: global WIP cap with automatic pull-to-cap on completions/scrap
+# - “Click to play”: step(), run_for(dt), run_until(t_stop) and a minimal example at bottom
+#
+# IMPORTANT
+# - All names/IDs are in English for consistency.
+# - Tune the CONFIG dict below to match your actual parameters.
+# - Keep units consistent. This file uses **seconds** for simulated time.
 # --------------------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -25,7 +35,7 @@ import time
 # ==============================================================================
 
 def wall_ms() -> int:
-    """Wall-clock milliseconds (profiling/logging only, not simulation time)."""
+    """Wall-clock milliseconds (only for profiling/logging, not simulation time)."""
     return int(time.time() * 1000)
 
 
@@ -33,7 +43,8 @@ def sample_time(dist: Dict[str, Any], base: float) -> float:
     """
     Sample a processing time given a distribution descriptor.
     Supported dist['type']: 'constant', 'normal', 'lognormal', 'triangular',
-                            'uniform', 'exponential'. Fallback: constant(base).
+                            'uniform', 'exponential'.
+    Fallback is 'constant' with the given base time.
     """
     if not dist:
         return max(0.0, float(base))
@@ -42,26 +53,33 @@ def sample_time(dist: Dict[str, Any], base: float) -> float:
 
     if t == "constant":
         return max(0.0, float(base))
+
     if t == "normal":
         mu = float(p1) if p1 is not None else float(base)
         sigma = float(p2) if p2 is not None else max(1e-9, 0.1 * mu)
         return max(0.0, random.gauss(mu, sigma))
+
     if t == "lognormal":
         mu = float(p1) if p1 is not None else math.log(max(1e-6, base))
         sigma = float(p2) if p2 is not None else 0.25
         return max(0.0, random.lognormvariate(mu, sigma))
+
     if t == "triangular":
         low = float(p1) if p1 is not None else 0.5 * base
         mode = float(p2) if p2 is not None else base
         high = float(p3) if p3 is not None else 1.5 * base
         return max(0.0, random.triangular(low, high, mode))
+
     if t == "uniform":
         a = float(p1) if p1 is not None else 0.8 * base
         b = float(p2) if p2 is not None else 1.2 * base
         return max(0.0, random.uniform(a, b))
+
     if t == "exponential":
         lam = 1.0 / float(base) if base else 1.0
         return max(0.0, random.expovariate(lam))
+
+    # Fallback to constant
     return max(0.0, float(base))
 
 
@@ -106,14 +124,14 @@ class Buffer:
 
 @dataclass
 class Team:
-    """Worker group. Size is informational; one job per Stage at a time."""
+    """Worker group that can be busy/idle. Size used for visibility; one job at a time per Stage."""
     team_id: Any
     name: str
     size: int = 1
     shift_id: Optional[Any] = None
 
     # utilization tracking
-    busy_time: float = 0.0
+    busy_time: float = 0.0          # accumulated busy time (simulation time units)
     last_busy_start: Optional[float] = None
 
     def start_busy(self, t: float):
@@ -130,16 +148,16 @@ class Team:
 class Stage:
     """
     Process node.
-    - input_buffers: list of required buffers; must pull 1 from each to start.
-    - output_buffer: single deterministic output buffer (optional).
-    - output_rules: probabilistic outputs: [{'buffer_id': 'C1', 'p': 0.4}, ...]
+    - Supports multiple input buffers (require 1 unit from each before starting).
+    - Supports either: a single output buffer, or probabilistic routing to one of many outputs.
+      Use 'output_buffer' (str) OR 'output_rules' (list of {'buffer_id': str, 'p': float}).
     """
     stage_id: Any
     name: str
     team_id: Any
-    input_buffers: List[Any] = field(default_factory=list)
-    output_buffer: Optional[Any] = None
-    output_rules: Optional[List[Dict[str, Any]]] = None
+    input_buffers: List[Any] = field(default_factory=list)  # e.g., ['D1', 'D2', 'C3'] for Final Assembly
+    output_buffer: Optional[Any] = None                     # single deterministic output
+    output_rules: Optional[List[Dict[str, Any]]] = None     # probabilistic outputs [{'buffer_id': 'C1', 'p': 0.4}, ...]
 
     base_process_time_sec: float = 1.0
     time_distribution: Dict[str, Any] = field(default_factory=dict)
@@ -147,13 +165,19 @@ class Stage:
     defect_rate: float = 0.0
     rework_stage_id: Optional[Any] = None
 
-    # internal
+    # internal state
     busy: bool = False
 
 
 @dataclass(order=True)
 class Event:
-    """Timed event for the DES engine."""
+    """
+    Timed event for the DES engine.
+    - time: event time (simulation time)
+    - seq: tie-breaker sequence number
+    - kind: event name ('try_start', 'complete', etc.)
+    - payload: dictionary with contextual data
+    """
     time: float
     seq: int
     kind: str = field(compare=False)
@@ -161,7 +185,7 @@ class Event:
 
 
 # ==============================================================================
-# Simulation environment with CONWIP pull
+# Simulation environment
 # ==============================================================================
 
 class LegoLeanEnv:
@@ -199,6 +223,7 @@ class LegoLeanEnv:
         self.stages: Dict[Any, Stage] = {}
         for s in self.cfg.get("stages", []):
             s_id = s.get("stage_id") or s.get("name")
+            # Normalize input buffers to list
             in_bufs = s.get("input_buffers")
             if isinstance(in_bufs, str) and in_bufs.strip():
                 in_bufs = [in_bufs]
@@ -220,19 +245,9 @@ class LegoLeanEnv:
         # Shifts (optional)
         self.shifts = self.cfg.get("shift_schedule", [])
 
-        # Parameters / disruptions
+        # Global parameters and random disruption controls
         self.parameters = self.cfg.get("parameters", {})
         self.random_events = self.cfg.get("random_events", {})
-
-        # --- CONWIP settings ---
-        # Global WIP cap (K). If None, behaves like push (no cap).
-        self.conwip_cap: Optional[int] = int(self.parameters.get("conwip_cap")) if self.parameters.get("conwip_cap") is not None else None
-        # Source stages for issuing new work (default: all stages with NO input buffers)
-        self.source_stage_ids: List[Any] = list(self.parameters.get("source_stage_ids", []))
-        if not self.source_stage_ids:
-            self.source_stage_ids = [s.stage_id for s in self.stages.values() if not s.input_buffers]
-        # Round-robin pointer for multi-source issuance
-        self._src_rr_idx: int = 0
 
         # Event queue and time
         self._evt_seq = 0
@@ -255,6 +270,7 @@ class LegoLeanEnv:
     # --------------------------------------------------------------------------
 
     def _is_in_shift(self, t: float) -> bool:
+        """Return True if time t (sec) falls inside any active shift window."""
         if not self.shifts:
             return True
         minute_in_day = (t / 60.0) % 1440.0
@@ -266,20 +282,25 @@ class LegoLeanEnv:
         return False
 
     def _advance_to_next_shift_start(self, t: float) -> float:
+        """Return the next time (sec) when a shift starts after t."""
         if not self.shifts:
             return t
         minute_in_day = (t / 60.0) % 1440.0
         starts = sorted([float(s.get("start_minute", 0)) for s in self.shifts])
         for st in starts:
             if st > minute_in_day:
-                return t + (st - minute_in_day) * 60.0
-        return t + ((1440.0 - minute_in_day) + starts[0]) * 60.0
+                delta_min = st - minute_in_day
+                return t + delta_min * 60.0
+        # Wrap to next day's first shift
+        delta_min = (1440.0 - minute_in_day) + starts[0]
+        return t + delta_min * 60.0
 
     # --------------------------------------------------------------------------
     # Event queue helpers
     # --------------------------------------------------------------------------
 
     def _push_event(self, when: float, kind: str, payload: Optional[Dict[str, Any]] = None):
+        """Schedule an event at time 'when'."""
         self._evt_seq += 1
         heapq.heappush(self._queue, Event(when, self._evt_seq, kind, payload or {}))
 
@@ -289,75 +310,31 @@ class LegoLeanEnv:
         return heapq.heappop(self._queue)
 
     # --------------------------------------------------------------------------
-    # CONWIP control (Pull)
-    # --------------------------------------------------------------------------
-
-    def set_conwip(self, K: Optional[int]):
-        """Set or disable CONWIP cap at runtime (None disables)."""
-        self.conwip_cap = None if K is None else int(K)
-        self._pull_to_cap()  # immediately try to pull if enabling or increasing
-
-    def issue_kanban(self, n: int = 1):
-        """
-        Manually issue 'n' CONWIP cards (i.e., authorize n more WIP if cap allows).
-        If no CONWIP, behaves like enqueue of orders (push).
-        """
-        # If CONWIP is active, respect the cap.
-        if self.conwip_cap is not None:
-            deficit = self.conwip_cap - self.current_wip
-            n = max(0, min(int(n), deficit))
-        for _ in range(n):
-            self._release_one()
-
-    def _pull_to_cap(self):
-        """If CONWIP is active, automatically pull new work until WIP reaches cap."""
-        if self.conwip_cap is None:
-            return
-        deficit = self.conwip_cap - self.current_wip
-        for _ in range(max(0, deficit)):
-            self._release_one()
-
-    def _release_one(self):
-        """
-        Increase WIP by 1 and schedule a try-start at the next source stage (round-robin).
-        This is the single 'authorized' release step used by both push and CONWIP pull.
-        """
-        # Accumulate WIP*time area before changing level
-        self._accumulate_wip(self.t)
-        self.current_wip += 1
-        self.started += 1
-
-        if not self.source_stage_ids:
-            # No explicit source stages (should not happen if config has at least one source)
-            # Fallback: schedule try_start for all stages without inputs
-            for s in self.stages.values():
-                if not s.input_buffers:
-                    self._push_event(self.t, "try_start", {"stage_id": s.stage_id})
-        else:
-            # Round-robin over declared sources
-            sid = self.source_stage_ids[self._src_rr_idx % len(self.source_stage_ids)]
-            self._src_rr_idx += 1
-            self._push_event(self.t, "try_start", {"stage_id": sid})
-
-        self.log.append(f"{self._fmt_t()} Authorization released: WIP={self.current_wip}.")
-
-    # --------------------------------------------------------------------------
     # Public API
     # --------------------------------------------------------------------------
 
     def enqueue_orders(self, qty: int = 1):
         """
-        Push-style enqueue for compatibility. Under CONWIP, this respects the cap:
-        it will only release up to (cap - current_wip). Without CONWIP, it releases all.
+        Increase WIP by 'qty' and trigger start attempts at all source stages
+        (stages with NO input buffers). This mimics releasing orders into the system.
         """
-        if self.conwip_cap is not None:
-            deficit = self.conwip_cap - self.current_wip
-            qty = max(0, min(int(qty), deficit))
-        for _ in range(int(qty)):
-            self._release_one()
+        # WIP area update before changing level
+        self._accumulate_wip(self.t)
+        self.current_wip += qty
+        self.started += qty
+
+        # For each 'source' stage (no input buffers), schedule 'qty' attempts
+        for s in self.stages.values():
+            if not s.input_buffers:
+                for _ in range(qty):
+                    self._push_event(self.t, "try_start", {"stage_id": s.stage_id})
+
+        self.log.append(f"{self._fmt_t()} Enqueued {qty} order(s) into source stages.")
 
     def step(self) -> Optional[Event]:
-        """Process the next scheduled event and return it. Returns None if idle."""
+        """
+        Process the next scheduled event and return it. Returns None if no events remain.
+        """
         ev = self._pop_event()
         if ev is None:
             return None
@@ -371,7 +348,7 @@ class LegoLeanEnv:
         # Advance simulation time
         self._on_time_advance(ev.time)
 
-        # Dispatch handler
+        # Dispatch to handler
         handler = getattr(self, f"_on_{ev.kind}", None)
         if handler:
             handler(ev)
@@ -380,35 +357,39 @@ class LegoLeanEnv:
         return ev
 
     def run_until(self, t_stop: float, max_events: int = 100000):
-        """Run until time reaches t_stop or event cap is hit."""
+        """Run the simulation until time reaches t_stop or event cap is hit."""
         count = 0
         while self._queue and count < max_events:
             if self._queue[0].time > t_stop:
                 break
             self.step()
             count += 1
+        # Fast-forward to t_stop for integral KPIs
         self._on_time_advance(t_stop)
 
     def run_for(self, dt: float, max_events: int = 100000):
-        """Run for dt seconds from current time."""
+        """Run the simulation for dt seconds from current time."""
         self.run_until(self.t + dt, max_events=max_events)
 
     # --------------------------------------------------------------------------
-    # KPIs
+    # KPI accumulation
     # --------------------------------------------------------------------------
 
     def _accumulate_wip(self, new_t: float):
+        """Accumulate WIP*time area to compute average WIP later."""
         dt = max(0.0, new_t - self.last_wip_time)
         self.wip_time_area += self.current_wip * dt
         self.last_wip_time = new_t
 
     def get_kpis(self) -> Dict[str, Any]:
-        sim_time = max(1e-9, self.t)
+        """Return KPI snapshot for the elapsed simulation."""
+        sim_time = max(1e-9, self.t)  # avoid div-by-zero
         throughput = self.finished / sim_time
         lead_time_avg = sum(self.lead_times) / len(self.lead_times) if self.lead_times else 0.0
         wip_avg = self.wip_time_area / sim_time
         utilization = {}
         for team_id, team in self.teams.items():
+            # If currently busy, close interval temporally for utilization calculation
             if team.last_busy_start is not None:
                 team.stop_busy(self.t)
                 team.start_busy(self.t)
@@ -421,45 +402,49 @@ class LegoLeanEnv:
             "utilization_per_team": utilization,
             "finished_units": self.finished,
             "started_units": self.started,
-            "current_wip": self.current_wip
         }
 
     # --------------------------------------------------------------------------
-    # Event Handlers
+    # Event handlers
     # --------------------------------------------------------------------------
 
     def _on_try_start(self, ev: Event):
+        """Attempt to start a job at the stage, pulling inputs and engaging the team."""
         stage = self.stages.get(ev.payload.get("stage_id"))
         if stage is None:
             return
 
+        # If stage is busy, try again shortly
         if stage.busy:
             self._push_event(self.t + 0.001, "try_start", {"stage_id": stage.stage_id})
             return
 
-        # Pull 1 unit from each required input (multi-input allowed)
+        # Check all required inputs (multi-input allowed)
         pulled_inputs: List[Buffer] = []
         for b_id in stage.input_buffers:
             buf = self.buffers.get(b_id)
             if not buf or not buf.pull(1):
-                # Rollback
+                # roll back any inputs we might have pulled already
                 for pb in pulled_inputs:
                     pb.push(1)
+                # retry later
                 self._push_event(self.t + 0.5, "try_start", {"stage_id": stage.stage_id})
                 return
             pulled_inputs.append(buf)
 
-        # Engage team utilization
+        # Engage team (utilization starts)
         team = self.teams.get(stage.team_id)
         if team:
             team.start_busy(self.t)
 
         stage.busy = True
 
-        # Sample processing time + disruption
+        # Draw processing time from distribution + optional disruption penalty
         ptime = sample_time(stage.time_distribution, stage.base_process_time_sec)
-        miss_p = float(self.random_events.get("missing_brick_prob", 0.0))
-        if random.random() < miss_p:
+
+        # Random disruption: missing bricks → extra processing time penalty
+        missing_prob = float(self.random_events.get("missing_brick_prob", 0.0))
+        if random.random() < missing_prob:
             penalty = float(self.random_events.get("missing_brick_penalty_sec", 5.0))
             ptime += penalty
             self.log.append(f"{self._fmt_t()} Disruption at '{stage.name}': missing bricks (+{penalty:.2f}s).")
@@ -468,33 +453,32 @@ class LegoLeanEnv:
         self._push_event(finish_t, "complete", {"stage_id": stage.stage_id})
 
     def _on_complete(self, ev: Event):
+        """Complete processing at a stage, handle defects/rework, then push outputs."""
         stage = self.stages.get(ev.payload.get("stage_id"))
         if stage is None:
             return
 
-        # Release team
+        # Release team (utilization ends)
         team = self.teams.get(stage.team_id)
         if team:
             team.stop_busy(self.t)
 
+        # Defect handling (rework or scrap)
         proceed_to_output = True
-        # Defect / rework / scrap
         if stage.defect_rate and random.random() < stage.defect_rate:
             if stage.rework_stage_id and stage.rework_stage_id in self.stages:
                 self._push_event(self.t, "try_start", {"stage_id": stage.rework_stage_id})
                 proceed_to_output = False
                 self.log.append(f"{self._fmt_t()} '{stage.name}' defect → rework at '{stage.rework_stage_id}'.")
             else:
-                # Scrap: item leaves system → WIP--
+                # Scrap: reduce WIP (this item leaves the system)
                 self._accumulate_wip(self.t)
                 self.current_wip = max(0, self.current_wip - 1)
                 proceed_to_output = False
                 self.log.append(f"{self._fmt_t()} '{stage.name}' defect → scrapped item.")
-                # CONWIP pull after WIP drop
-                self._pull_to_cap()
 
         if proceed_to_output:
-            # Choose output buffer (deterministic or probabilistic)
+            # Determine output buffer (single deterministic OR probabilistic rules)
             out_buffer_id = stage.output_buffer
             if stage.output_rules:
                 r = random.random()
@@ -510,33 +494,34 @@ class LegoLeanEnv:
             if out_buffer_id:
                 ob = self.buffers.get(out_buffer_id)
                 if ob and ob.push(1):
-                    self.log.append(f"{self._fmt_t()} '{stage.name}' → '{out_buffer_id}'.")
+                    self.log.append(f"{self._fmt_t()} '{stage.name}' pushed item → '{out_buffer_id}'.")
                 else:
-                    # Output buffer is full → block and retry completion
+                    # Output buffer full or missing → delay and retry the completion
                     self._push_event(self.t + 0.5, "complete", {"stage_id": stage.stage_id})
                     return
             else:
-                # Final sink: finished product → WIP--
+                # No output buffer means this is a sink/final stage → finished product
                 self.finished += 1
-                self.lead_times.append(self.t - 0.0)  # If you track per-item start, use exact start time here.
+                # Simple lead-time approximation: we assume each order "started at t=0".
+                # If you track per-unit start times, record exact lead times here.
+                self.lead_times.append(self.t - 0.0)
                 self._accumulate_wip(self.t)
                 self.current_wip = max(0, self.current_wip - 1)
-                self.log.append(f"{self._fmt_t()} Finished at '{stage.name}'. Finished={self.finished}")
-                # CONWIP pull after WIP drop
-                self._pull_to_cap()
+                self.log.append(f"{self._fmt_t()} Product finished at '{stage.name}'. Finished={self.finished}")
 
-        # Free this stage and trigger downstream
+        # Free the stage and immediately attempt next start at this stage
         stage.busy = False
         self._push_event(self.t, "try_start", {"stage_id": stage.stage_id})
 
-        # Downstream triggers for any stage that consumes from produced buffers
+        # If this stage has an output buffer, also trigger downstream stages that require it
         out_bufs = []
         if stage.output_buffer:
-            out_bufs.append(stage.output_buffer)
+            out_bufs = [stage.output_buffer]
         if stage.output_rules:
             out_bufs.extend([r.get("buffer_id") for r in stage.output_rules if r.get("buffer_id")])
+
         for s in self.stages.values():
-            if any(ib in out_bufs for ib in s.input_buffers):
+            if any(ib == b_id for b_id in out_bufs for ib in s.input_buffers):
                 self._push_event(self.t, "try_start", {"stage_id": s.stage_id})
 
     # --------------------------------------------------------------------------
@@ -563,6 +548,10 @@ class LegoLeanEnv:
 # ==============================================================================
 
 CONFIG: Dict[str, Any] = {
+    # ----------------------------------------------------------------------------
+    # Buffers (inventories). Use None capacity for "infinite" buffers.
+    # B, C1, C2, C3, D1, D2, and E follow your LEGO flow notation.
+    # ----------------------------------------------------------------------------
     "buffers": [
         {"buffer_id": "B",  "name": "Warehouse B (post-TypeSorting)", "capacity": 999, "initial_stock": 30},
         {"buffer_id": "C1", "name": "C1 (Axis Parts)",                "capacity": 999, "initial_stock": 0},
@@ -572,20 +561,33 @@ CONFIG: Dict[str, Any] = {
         {"buffer_id": "D2", "name": "D2 (Chassis Subassembly)",       "capacity": 999, "initial_stock": 0},
         {"buffer_id": "E",  "name": "E (Finished Gliders)",           "capacity": 999, "initial_stock": 0},
     ],
+
+    # ----------------------------------------------------------------------------
+    # Teams (workers). One stage uses one team at a time.
+    # ----------------------------------------------------------------------------
     "teams": [
-        {"team_id": "T1", "name": "Type Sorting Team",   "size": 2, "shift_id": "day"},
-        {"team_id": "T2", "name": "Set Sorting Team",    "size": 2, "shift_id": "day"},
-        {"team_id": "T3", "name": "Axis Team",           "size": 2, "shift_id": "day"},
-        {"team_id": "T4", "name": "Chassis Team",        "size": 2, "shift_id": "day"},
-        {"team_id": "T5", "name": "Final Assembly Team", "size": 3, "shift_id": "day"},
+        {"team_id": "T1", "name": "Type Sorting Team",  "size": 2, "shift_id": "day"},
+        {"team_id": "T2", "name": "Set Sorting Team",   "size": 2, "shift_id": "day"},
+        {"team_id": "T3", "name": "Axis Team",          "size": 2, "shift_id": "day"},
+        {"team_id": "T4", "name": "Chassis Team",       "size": 2, "shift_id": "day"},
+        {"team_id": "T5", "name": "Final Assembly Team","size": 3, "shift_id": "day"},
     ],
+
+    # ----------------------------------------------------------------------------
+    # Stages (process nodes).
+    # - S1 (Type Sorting): no input buffers → pushes to B
+    # - S2 (Set Sorting): pulls from B, probabilistic routing to C1/C2/C3
+    # - S3 (Axis Assembly): C1 → D1
+    # - S4 (Chassis Assembly): C2 → D2
+    # - S5 (Final Assembly): D1 + D2 + C3 → E (multi-input)
+    # ----------------------------------------------------------------------------
     "stages": [
         {
             "stage_id": "S1",
             "name": "Type Sorting",
             "team_id": "T1",
-            "input_buffers": [],
-            "output_buffer": "B",
+            "input_buffers": [],               # source stage (no inputs)
+            "output_buffer": "B",              # deterministic output
             "base_process_time_sec": 2.5,
             "time_distribution": {"type": "triangular", "p1": 2.0, "p2": 2.5, "p3": 4.0},
             "transport_time_sec": 0.2,
@@ -596,7 +598,7 @@ CONFIG: Dict[str, Any] = {
             "name": "Set Sorting",
             "team_id": "T2",
             "input_buffers": ["B"],
-            "output_rules": [
+            "output_rules": [                   # probabilistic split into C1/C2/C3
                 {"buffer_id": "C1", "p": 0.40},
                 {"buffer_id": "C2", "p": 0.40},
                 {"buffer_id": "C3", "p": 0.20}
@@ -605,7 +607,7 @@ CONFIG: Dict[str, Any] = {
             "time_distribution": {"type": "triangular", "p1": 2.0, "p2": 3.0, "p3": 5.0},
             "transport_time_sec": 0.3,
             "defect_rate": 0.01,
-            "rework_stage_id": "S2"
+            "rework_stage_id": "S2"            # simple rework back to self
         },
         {
             "stage_id": "S3",
@@ -633,7 +635,7 @@ CONFIG: Dict[str, Any] = {
             "stage_id": "S5",
             "name": "Final Assembly",
             "team_id": "T5",
-            "input_buffers": ["D1", "D2", "C3"],
+            "input_buffers": ["D1", "D2", "C3"],   # multi-input
             "output_buffer": "E",
             "base_process_time_sec": 6.0,
             "time_distribution": {"type": "triangular", "p1": 5.0, "p2": 6.0, "p3": 9.0},
@@ -641,18 +643,26 @@ CONFIG: Dict[str, Any] = {
             "defect_rate": 0.03
         },
     ],
+
+    # ----------------------------------------------------------------------------
+    # Shift schedule (optional). Times are minutes in a 24h day. Here: 08:00–16:00
+    # ----------------------------------------------------------------------------
     "shift_schedule": [
         {"shift_id": "day", "start_minute": 8 * 60, "end_minute": 16 * 60}
     ],
-    "parameters": {
-        # --- CONWIP (Pull) ---
-        "conwip_cap": 50,                 # Global WIP cap K
-        # Optionally specify source stages. If omitted, all stages with no inputs are used.
-        "source_stage_ids": ["S1"],
 
-        # Other optional knobs
+    # ----------------------------------------------------------------------------
+    # Global parameters (optional, free-form)
+    # ----------------------------------------------------------------------------
+    "parameters": {
         "target_takt_sec": 10.0
     },
+
+    # ----------------------------------------------------------------------------
+    # Random disruptions (optional)
+    # - missing_brick_prob: probability that an operation suffers extra time
+    # - missing_brick_penalty_sec: the extra time added when disruption occurs
+    # ----------------------------------------------------------------------------
     "random_events": {
         "missing_brick_prob": 0.10,
         "missing_brick_penalty_sec": 2.0
@@ -661,25 +671,28 @@ CONFIG: Dict[str, Any] = {
 
 
 # ==============================================================================
-# Minimal example (you can delete in production)
+# Minimal example (you can delete this block in production)
 # ==============================================================================
 if __name__ == "__main__":
+    # Build env with deterministic seed for reproducibility
     env = LegoLeanEnv(CONFIG, time_unit="sec", seed=42)
 
-    # CONWIP: automatically pull-to-cap at start
-    env._pull_to_cap()
+    # Release some orders into the system (source stage = S1)
+    env.enqueue_orders(qty=50)
 
-    # Kick off try_start for all stages once (sources will be triggered by _release_one)
+    # Kick off "try_start" for all stages once (source stages already enqueued above)
     for s in env.stages.values():
         env._push_event(env.t, "try_start", {"stage_id": s.stage_id})
 
-    # Simulate 1 hour
+    # Simulate for 1 hour (3600 seconds)
     env.run_for(3600.0)
 
+    # KPIs
     print("--- KPIs ---")
     for k, v in env.get_kpis().items():
         print(f"{k}: {v}")
 
+    # Trace (last few lines)
     print("\n--- Trace (last 15) ---")
     for line in env.log[-15:]:
         print(line)
