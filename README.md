@@ -1,4 +1,33 @@
-# LEGO Lean Production — Mathematical Model (v0.1)
+# LEGO Lean Production — Simulator (Push, DES)
+
+## Quick Start
+
+1) Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+2) Run the interactive UI (Streamlit)
+
+```bash
+streamlit run app.py
+```
+
+3) Or run the CLI example
+
+```bash
+python env.py
+```
+
+Notes
+- We currently use push strategy (no CONWIP). Use the sidebar to set orders to release.
+- Randomness is enabled by default; you can toggle Deterministic processing in the UI.
+- `Environment.xlsx` is no longer used at runtime; parameters live in `env.py`'s `CONFIG`.
+
+---
+
+# Mathematical Model (v0.1)
 
 ## 1) Sets, Indices, Graph
 
@@ -17,7 +46,9 @@
 
 ## 2) Parameters
 
-- **Nominal processing time** at stage *i*: τ<sub>i</sub> &gt; 0 (seconds)  
+- **Nominal processing time** at stage *i*: τ<sub>i</sub> &gt; 0 (seconds **per worker**)  
+- **Number of workers** at stage *i*: w<sub>i</sub> ∈ ℕ<sup>+</sup>  
+- **Effective processing time**: τ<sub>i</sub> / w<sub>i</sub>  
 - **Transport time**: δ<sub>i</sub> ≥ 0  
 - **Time distribution descriptor**: D<sub>i</sub> = (type, p<sub>i1</sub>, p<sub>i2</sub>, p<sub>i3</sub>)  
 - **Defect probability**: q<sub>i</sub> ∈ [0, 1]  
@@ -40,11 +71,16 @@ For each job at stage *i*:
 S<sub>i</sub> = T<sub>i</sub> + Δ<sub>i</sub> + Z<sub>i</sub>
 
 where  
-- T<sub>i</sub> ~ D<sub>i</sub>(τ<sub>i</sub>; p<sub>i1</sub>, p<sub>i2</sub>, p<sub>i3</sub>)  
-- Δ<sub>i</sub> = δ<sub>i</sub>  
+- T<sub>i</sub> ~ D<sub>i</sub>(τ<sub>i</sub> / w<sub>i</sub>; p<sub>i1</sub>, p<sub>i2</sub>, p<sub>i3</sub>) — **processing time scales inversely with workers**  
+- Δ<sub>i</sub> = δ<sub>i</sub> — **transport time (unaffected by workers)**  
 - Z<sub>i</sub> = M · 1{disruption} with P(disruption)=π<sub>miss</sub>  
 
 Defect outcome: with prob q<sub>i</sub>, route to r(i) or scrap.
+
+**Example**: With τ<sub>i</sub> = 3.0 sec/worker, δ<sub>i</sub> = 0.3 sec:
+- 1 worker: E[S<sub>i</sub>] = 3.0 / 1 + 0.3 = 3.3 sec
+- 2 workers: E[S<sub>i</sub>] = 3.0 / 2 + 0.3 = 1.8 sec
+- 3 workers: E[S<sub>i</sub>] = 3.0 / 3 + 0.3 = 1.3 sec
 
 ---
 
@@ -127,6 +163,7 @@ CONWIP: K controls θ(K) and W̄(K)=L̄(K)/θ(K). Tune K to balance throughput/l
 | Model Element | env.py Mapping |
 |----------------|----------------|
 | τ<sub>i</sub>, D<sub>i</sub> | `base_process_time_sec`, `time_distribution` |
+| w<sub>i</sub> | `workers` |
 | δ<sub>i</sub> | `transport_time_sec` |
 | q<sub>i</sub>, r(i) | `defect_rate`, `rework_stage_id` |
 | P<sub>routing</sub> | `output_rules` (e.g. S2→C1/C2/C3) |

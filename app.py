@@ -1,8 +1,5 @@
 # app.py
-# Streamlit control panel for the LEGO Lean DES environment with CONWIP (Pull).
-# - Lets you edit parameters (CONWIP cap, routing, processing times, disruptions, shifts)
-# - Runs the simulation and displays KPIs and logs
-# - No external files required beyond env.py
+    # Streamlit control panel for LEGO Lean DES (Push mode) with KPI charts.
 
 import copy
 import json
@@ -10,8 +7,8 @@ import time
 from typing import Dict, Any, List
 
 import streamlit as st
+import pandas as pd
 
-# Import your environment and default configuration
 from env import LegoLeanEnv, CONFIG as DEFAULT_CONFIG
 
 # ---------------------------
@@ -21,7 +18,6 @@ from env import LegoLeanEnv, CONFIG as DEFAULT_CONFIG
 def normalize_probs(values: List[float]) -> List[float]:
     total = sum(max(0.0, v) for v in values)
     if total <= 0:
-        # fallback to equal split if all zero/negative
         n = len(values)
         return [1.0 / n] * n
     return [max(0.0, v) / total for v in values]
@@ -39,109 +35,96 @@ def buffer_by_id(cfg: Dict[str, Any], bid: str) -> Dict[str, Any]:
     raise KeyError(f"Buffer not found: {bid}")
 
 # ---------------------------
-# App layout
+# App UI
 # ---------------------------
 
-st.set_page_config(page_title="LEGO Lean (CONWIP) Simulator", layout="wide")
-st.title("LEGO Lean Production Simulator (CONWIP Pull)")
+st.set_page_config(page_title="LEGO Lean Simulator", layout="wide")
+st.title("LEGO Lean Production Simulator (Push)")
 
 with st.sidebar:
     st.header("Run Controls")
     sim_time = st.number_input("Simulation time (seconds)", min_value=1, value=3600, step=60)
     seed = st.number_input("Random seed (None = random)", min_value=0, value=42, step=1)
+    orders_to_release = st.number_input("Orders to release (push)", min_value=0, value=50, step=10)
+    deterministic = st.checkbox("Deterministic processing (override times; disable disruptions)", value=False)
+    det_routing = st.checkbox("Deterministic routing (avoid starvation in S2)", value=False)
     show_logs_n = st.number_input("Show last N logs", min_value=0, value=30, step=5)
 
-# Make a working copy of the default config
 cfg = copy.deepcopy(DEFAULT_CONFIG)
 
 st.subheader("Global Parameters")
-col1, col2, col3 = st.columns(3)
-with col1:
-    conwip_cap = st.number_input("CONWIP cap K (None disables)", min_value=0, value=int(cfg["parameters"].get("conwip_cap", 50)))
-    cfg["parameters"]["conwip_cap"] = int(conwip_cap)
-with col2:
+c1, c2 = st.columns(2)
+with c1:
     takt = st.number_input("Target takt (sec)", min_value=0.0, value=float(cfg["parameters"].get("target_takt_sec", 10.0)), step=0.5)
     cfg["parameters"]["target_takt_sec"] = takt
-with col3:
-    source_ids_default = cfg["parameters"].get("source_stage_ids", [])
-    all_sources = [s["stage_id"] for s in cfg["stages"] if not s.get("input_buffers")]
-    if not source_ids_default:
-        source_ids_default = all_sources
-    source_stage_ids = st.multiselect("Source stages (for CONWIP release)", options=all_sources, default=source_ids_default)
-    cfg["parameters"]["source_stage_ids"] = source_stage_ids
+with c2:
+    sample_dt = st.number_input("Timeline sample Δt (sec)", min_value=0.5, value=float(cfg["parameters"].get("timeline_sample_dt_sec", 5.0)), step=0.5)
+    cfg["parameters"]["timeline_sample_dt_sec"] = float(sample_dt)
 
 st.markdown("---")
 st.subheader("Shift Window")
-c1, c2 = st.columns(2)
-with c1:
+d1, d2 = st.columns(2)
+with d1:
     shift_start_min = st.number_input("Shift start (minutes in day)", min_value=0, max_value=24*60, value=int(cfg["shift_schedule"][0]["start_minute"]))
-with c2:
+with d2:
     shift_end_min = st.number_input("Shift end (minutes in day)", min_value=0, max_value=24*60, value=int(cfg["shift_schedule"][0]["end_minute"]))
 cfg["shift_schedule"][0]["start_minute"] = int(shift_start_min)
 cfg["shift_schedule"][0]["end_minute"] = int(shift_end_min)
 
 st.markdown("---")
-st.subheader("Routing (Stage S2 → C1/C2/C3)")
-# Read current routing (if any)
+st.subheader("Routing (S2 → C1/C2/C3)")
+st.caption("Adjust routing probabilities; auto-normalized to sum=1")
 s2 = stage_by_id(cfg, "S2")
 p_c1, p_c2, p_c3 = 0.40, 0.40, 0.20
 if s2.get("output_rules"):
-    rules = s2["output_rules"]
-    # assume order [C1, C2, C3]
     try:
-        p_c1 = float([r for r in rules if r["buffer_id"] == "C1"][0]["p"])
-        p_c2 = float([r for r in rules if r["buffer_id"] == "C2"][0]["p"])
-        p_c3 = float([r for r in rules if r["buffer_id"] == "C3"][0]["p"])
+        p_c1 = float([r for r in s2["output_rules"] if r["buffer_id"] == "C1"][0]["p"])
+        p_c2 = float([r for r in s2["output_rules"] if r["buffer_id"] == "C2"][0]["p"])
+        p_c3 = float([r for r in s2["output_rules"] if r["buffer_id"] == "C3"][0]["p"])
     except Exception:
         pass
-
-rc1, rc2, rc3 = st.columns(3)
-with rc1:
-    p_c1 = st.number_input("P(C1)", min_value=0.0, max_value=1.0, value=p_c1, step=0.05)
-with rc2:
-    p_c2 = st.number_input("P(C2)", min_value=0.0, max_value=1.0, value=p_c2, step=0.05)
-with rc3:
-    p_c3 = st.number_input("P(C3)", min_value=0.0, max_value=1.0, value=p_c3, step=0.05)
-
-p_c1, p_c2, p_c3 = normalize_probs([p_c1, p_c2, p_c3])
-s2["output_rules"] = [
-    {"buffer_id": "C1", "p": p_c1},
-    {"buffer_id": "C2", "p": p_c2},
-    {"buffer_id": "C3", "p": p_c3},
-]
-
-st.caption(f"Normalized routing: C1={p_c1:.2f}, C2={p_c2:.2f}, C3={p_c3:.2f}")
+pc1 = st.number_input("P(C1)", min_value=0.0, max_value=1.0, value=p_c1, step=0.05)
+pc2 = st.number_input("P(C2)", min_value=0.0, max_value=1.0, value=p_c2, step=0.05)
+pc3 = st.number_input("P(C3)", min_value=0.0, max_value=1.0, value=p_c3, step=0.05)
+pc1, pc2, pc3 = normalize_probs([pc1, pc2, pc3])
+s2["output_rules"] = [{"buffer_id": "C1", "p": pc1}, {"buffer_id": "C2", "p": pc2}, {"buffer_id": "C3", "p": pc3}]
+st.caption(f"Normalized routing: C1={pc1:.2f}, C2={pc2:.2f}, C3={pc3:.2f}")
+cfg["parameters"]["routing_mode"] = "deterministic" if det_routing else "random"
 
 st.markdown("---")
-st.subheader("Processing Times & Distributions (per Stage)")
-exp = st.expander("Advanced: per-stage timing, transport, defect, rework", expanded=False)
+st.subheader("Processing & Quality")
+exp = st.expander("Per-stage timing, transport, defects", expanded=False)
 
 def stage_controls(label: str, sid: str):
     st.markdown(f"**{label} ({sid})**")
     s = stage_by_id(cfg, sid)
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        base = st.number_input(f"{sid} base_process_time_sec", min_value=0.0, value=float(s.get("base_process_time_sec", 1.0)), step=0.5, key=f"{sid}_base")
+        base = st.number_input(f"{sid} base_time/worker (sec)", min_value=0.0, value=float(s.get("base_process_time_sec", 1.0)), step=0.5, key=f"{sid}_base")
         s["base_process_time_sec"] = base
     with c2:
-        dist = st.selectbox(f"{sid} dist.type", options=["constant", "triangular", "normal", "uniform", "lognormal", "exponential"], index=0, key=f"{sid}_dist")
-        s["time_distribution"]["type"] = dist
+        workers = st.number_input(f"{sid} workers", min_value=1, value=int(s.get("workers", 1)), step=1, key=f"{sid}_workers")
+        s["workers"] = workers
     with c3:
-        p1 = st.number_input(f"{sid} dist.p1", value=float(s["time_distribution"].get("p1") or (base*0.5 if dist=="triangular" else base)), step=0.5, key=f"{sid}_p1")
-        s["time_distribution"]["p1"] = p1
+        dist = st.selectbox(f"{sid} dist.type", options=["constant", "triangular", "normal", "uniform", "lognormal", "exponential"], index=0, key=f"{sid}_dist")
+        if "time_distribution" not in s or s.get("time_distribution") is None:
+            s["time_distribution"] = {}
+        s["time_distribution"]["type"] = dist
     with c4:
-        p2 = st.number_input(f"{sid} dist.p2", value=float(s["time_distribution"].get("p2") or (base if dist=="triangular" else base*0.1)), step=0.5, key=f"{sid}_p2")
-        s["time_distribution"]["p2"] = p2
-
-    c5, c6, c7 = st.columns(3)
+        p1 = st.number_input(f"{sid} p1", value=float(s["time_distribution"].get("p1") or (base*0.5 if dist=="triangular" else base)), step=0.5, key=f"{sid}_p1")
+        s["time_distribution"]["p1"] = p1
     with c5:
-        p3 = st.number_input(f"{sid} dist.p3", value=float(s["time_distribution"].get("p3") or (base*1.5 if dist=="triangular" else 0.0)), step=0.5, key=f"{sid}_p3")
+        p2 = st.number_input(f"{sid} p2", value=float(s["time_distribution"].get("p2") or (base if dist=="triangular" else base*0.1)), step=0.5, key=f"{sid}_p2")
+        s["time_distribution"]["p2"] = p2
+    e1, e2, e3 = st.columns(3)
+    with e1:
+        p3 = st.number_input(f"{sid} p3", value=float(s["time_distribution"].get("p3") or (base*1.5 if dist=="triangular" else 0.0)), step=0.5, key=f"{sid}_p3")
         s["time_distribution"]["p3"] = p3
-    with c6:
-        trans = st.number_input(f"{sid} transport_time_sec", min_value=0.0, value=float(s.get("transport_time_sec", 0.0)), step=0.1, key=f"{sid}_tt")
+    with e2:
+        trans = st.number_input(f"{sid} transport (sec)", min_value=0.0, value=float(s.get("transport_time_sec", 0.0)), step=0.1, key=f"{sid}_tt")
         s["transport_time_sec"] = trans
-    with c7:
-        defect = st.number_input(f"{sid} defect_rate", min_value=0.0, max_value=1.0, value=float(s.get("defect_rate", 0.0)), step=0.01, key=f"{sid}_def")
+    with e3:
+        defect = st.number_input(f"{sid} defect rate", min_value=0.0, max_value=1.0, value=float(s.get("defect_rate", 0.0)), step=0.01, key=f"{sid}_def")
         s["defect_rate"] = defect
 
 with exp:
@@ -162,7 +145,7 @@ with c2:
     cfg["random_events"]["missing_brick_penalty_sec"] = miss_pen
 
 st.markdown("---")
-st.subheader("Initial Stocks (Buffers)")
+st.subheader("Initial Buffer Stocks")
 bcols = st.columns(7)
 for i, bid in enumerate(["B", "C1", "C2", "C3", "D1", "D2", "E"]):
     with bcols[i]:
@@ -174,51 +157,54 @@ for i, bid in enumerate(["B", "C1", "C2", "C3", "D1", "D2", "E"]):
 # Run
 # ---------------------------
 
-run = st.button("Run Simulation")
-
-if run:
+if st.button("Run Simulation"):
     t0 = time.time()
+    # Apply deterministic override if selected
+    if deterministic:
+        for s in cfg["stages"]:
+            s["time_distribution"] = {"type": "constant"}
+        cfg["random_events"]["missing_brick_prob"] = 0.0
     env = LegoLeanEnv(cfg, time_unit="sec", seed=int(seed))
-    # CONWIP: automatically pull-to-cap at start
-    env._pull_to_cap()
-    # Kick-start stages trying to start
+    # Push-mode: release orders, then kick off
+    if int(orders_to_release) > 0:
+        env.enqueue_orders(qty=int(orders_to_release))
     for s in env.stages.values():
         env._push_event(env.t, "try_start", {"stage_id": s.stage_id})
-    # Run
     env.run_for(float(sim_time))
     t1 = time.time()
 
-    st.success(f"Simulation finished in {t1 - t0:.3f} sec (wall time).")
-
-    # KPIs
+    st.success(f"Simulation finished in {t1 - t0:.3f} sec (wall).")
     kpis = env.get_kpis()
+
     st.subheader("KPIs")
     st.json(kpis)
 
-    # Utilization table
-    util_items = [{"team_id": k, "utilization": v} for k, v in kpis.get("utilization_per_team", {}).items()]
-    if util_items:
-        st.table(util_items)
+    util_rows = [{"team_id": k, "utilization": round(v, 4)} for k, v in kpis.get("utilization_per_team", {}).items()]
+    if util_rows:
+        st.table(util_rows)
 
-    # Logs
-    st.subheader("Event Trace (tail)")
-    if show_logs_n > 0:
-        tail = env.log[-int(show_logs_n):]
-        st.code("\n".join(tail), language="text")
+    # --- Charts ---
+    st.subheader("KPI Time Series")
+    if env.timeline:
+        df = pd.DataFrame(env.timeline).set_index("t")
+        st.markdown("**WIP and Finished**")
+        st.line_chart(df[["wip", "finished"]], height=220)
 
-    # Download config & logs
+        st.markdown("**Throughput (units/min)**")
+        st.line_chart(df[["throughput_per_min"]], height=220)
+
+        buffer_cols = [c for c in ["B", "C1", "C2", "C3", "D1", "D2", "E"] if c in df.columns]
+        if buffer_cols:
+            st.markdown("**Buffer Levels**")
+            st.line_chart(df[buffer_cols], height=260)
+    else:
+        st.info("No timeline captured. Increase simulation time or decrease sample interval.")
+
+    # Downloads
     st.subheader("Artifacts")
-    st.download_button(
-        label="Download used config (JSON)",
-        data=json.dumps(cfg, indent=2),
-        file_name="used_config.json",
-        mime="application/json"
-    )
-    st.download_button(
-        label="Download logs (txt)",
-        data="\n".join(env.log),
-        file_name="trace_log.txt",
-        mime="text/plain"
-    )
+    st.download_button("Download used config (JSON)", data=json.dumps(cfg, indent=2),
+                       file_name="used_config.json", mime="application/json")
+    st.download_button("Download logs (txt)", data="\n".join(env.log),
+                       file_name="trace_log.txt", mime="text/plain")
 else:
-    st.info("Adjust parameters on the page, then click **Run Simulation**.")
+    st.info("Adjust parameters, then click **Run Simulation**.")
