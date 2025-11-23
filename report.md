@@ -46,28 +46,11 @@ Notes
 ---
 
 ## 2) Parameters
-
-- **Nominal processing time** at stage *i*: τ<sub>i</sub> &gt; 0 (seconds **per worker**)  
-- **Number of workers** at stage *i*: w<sub>i</sub> ∈ ℕ<sup>+</sup>  
-- **Effective processing time**: τ<sub>i</sub> / w<sub>i</sub>  
-- **Transport time**: δ<sub>i</sub> ≥ 0  
-- **Time distribution descriptor**: D<sub>i</sub> = (type, p<sub>i1</sub>, p<sub>i2</sub>, p<sub>i3</sub>)  
-- **Defect probability**: q<sub>i</sub> ∈ [0, 1]  
-- **Rework routing**: defective items at *i* go to r(i) ∈ S or are scrapped  
-- **Routing probabilities (S₂)**: P<sub>2→C1</sub>, P<sub>2→C2</sub>, P<sub>2→C3</sub> with Σp = 1  
-- **Buffer capacity**: cap<sub>b</sub> ∈ ℕ ∪ {∞}  
-- **Shift availability** α(t) ∈ {0, 1} (1 = working, 0 = off)  
-- **Random disruption (missing bricks)**:  
-  - Occurrence π<sub>miss</sub>  
-  - Extra time M with E[M] = m  
-- **System WIP cap (CONWIP)** K ∈ ℕ  
-- **Release rate** λ orders/sec (for push)
-
 ## Global Parameters (`parameters`)
 
 These are configuration-level knobs in `env.py`’s `CONFIG["parameters"]` that affect the whole simulation rather than a single stage.
 
-### Simulation Parameters (`parameters`)
+### Operational(simulation) Parameters (`parameters`)
 
 | Parameter                | Default Value | Description |
 |--------------------------|---------------|-------------|
