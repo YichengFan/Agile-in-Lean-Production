@@ -219,11 +219,15 @@ Additional implicit assumptions:
 
 ---
 
-## Next Steps
+## 🚀 Next Steps
 
--1.Improving push system
-    -**Batch inflow/outflow
-    -**Conceptual model improvement
--2.Preparation for pull system - Conceptual modeling
--3.Laying foundation for multiple model production
+1. **Improve the push system**
+   - 🔄 Batch inflow / outflow
+   - 🧩 Conceptual model refinement
+
+2. **Prepare for pull system (CONWIP / Kanban)**
+   - 🏗️ Conceptual modeling
+
+3. **Lay foundation for multi-model production**
+
 
