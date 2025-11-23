@@ -46,8 +46,6 @@ Notes
 ---
 
 ## 2) Parameters
-## Global Parameters (`parameters`)
-
 These are configuration-level knobs in `env.py`’s `CONFIG["parameters"]` that affect the whole simulation rather than a single stage.
 
 ### Operational(simulation) Parameters (`parameters`)
