@@ -281,7 +281,8 @@ At the level of this project we rely on a few key simplifications:
    - The theoretical CONWIP WIP cap \(K\) and λ-based release are not active in the current implementation.
 
 2. **No switching cost / setup time**  
-   - We do not model product changeovers or sequence-dependent setups.  
+   - We plan to implement this assumption in the next iteration.
+   - We do not model product changeovers or sequence-dependent setups.
    - All jobs are treated as the same “glider” product; routing split at S₂ (to C₁/C₂/C₃) is assumed to be free apart from the processing times already specified.
 
 3. **Simplified timing rule**  
