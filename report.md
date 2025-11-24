@@ -113,9 +113,8 @@ X<sub>D1</sub> ≥ 1 and X<sub>D2</sub> ≥ 1 and X<sub>C3</sub> ≥ 1.
 ## 5) Event Logic
 
 **Release event**  
-- If CONWIP: allow if L(t) &lt; K  
-- Else: release per λ or manual  
-- Each release triggers “try_start” at a source stage; L(t) += 1
+- The current implementation uses a **pure push system**: jobs are released only via manual batch release (`enqueue_orders`).  
+- CONWIP (WIP-cap K) and λ-based continuous release are part of the conceptual model but **not implemented** in the current code.
 
 **Try-start at stage i**  
 - If Y<sub>i</sub> = 0 and all inputs available:  
