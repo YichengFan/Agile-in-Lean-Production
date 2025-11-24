@@ -143,19 +143,12 @@ Shift constraint: postpone if α(t)=0.
   Mean time a job spends in the system (from release to completion), in seconds. This captures responsiveness: lower and more stable lead times are desirable.
 
 - **Utilization** ρ<sub>i</sub> = U<sub>i</sub>(t)/t
-For each team \(T_i\):
-
-\[
-\rho_i = \frac{\text{busy\_time of team } i}{\text{sim\_time}}
-\]
-
-Returned as a dictionary in the KPIs.  
+ 
 **High utilization (ρ > 0.85) indicates a potential bottleneck.**  
 - **Blocking/starvation counts**
 - **Starvation** = stage wants to start but has no input  
 - **Blocking** = stage completes but the output buffer is full  
-
-Both are counted per stage.  
+    Both are counted per stage.  
 **They help diagnose flow imbalance, buffer sizing issues, and routing problems.**  
 - **Defect rate** = defective / total processed
 The simulation includes defect logic (scrap or rework),  
