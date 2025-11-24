@@ -136,7 +136,6 @@ X<sub>D1</sub> ≥ 1 and X<sub>D2</sub> ≥ 1 and X<sub>C3</sub> ≥ 1.
 Shift constraint: postpone if α(t)=0.
 
 ---
-
 ## 6) KPIs
 
 Below are the Key Performance Indicators reported by the simulator.  
@@ -144,29 +143,29 @@ Each KPI is defined mathematically and explained in terms of why it matters for 
 
 ---
 
-### **▪ Throughput (`throughput_per_sec`)**
+### ▪ Throughput (`throughput_per_sec`)
 
 **Formula**
 
-\[
+$$
 \text{Throughput} = \frac{\text{finished\_units}}{\text{sim\_time\_sec}}
-\]
+$$
 
 **Meaning**
 
-Number of finished units per second.  
-Often converted to units/hour by multiplying by 3600.  
-**This is the primary indicator of system capacity.**
+Number of finished units per second, computed as `finished_units / sim_time_sec`.  
+In practice we often convert this to units/hour by multiplying by 3600.  
+This is the primary indicator of system capacity.
 
 ---
 
-### **▪ Average WIP (`wip_avg_units`)**
+### ▪ Average WIP (`wip_avg_units`)
 
 **Formula**
 
-\[
-\bar{L} = \frac{1}{t} \int_0^t L(s)\,ds
-\]
+$$
+\bar{L} = \frac{1}{t} \int_0^t L(s)\,\mathrm{d}s
+$$
 
 where \(L(s)\) is Work-In-Process at time \(s\).
 
@@ -174,45 +173,51 @@ where \(L(s)\) is Work-In-Process at time \(s\).
 
 Time-averaged WIP inside the system.  
 Directly linked to lead time via Little’s Law.  
-**High WIP → long lead times & unstable flow.**
+High WIP \(\Rightarrow\) long lead times and unstable flow.
 
 ---
 
-### **▪ Average lead time (`lead_time_avg_sec`)**
+### ▪ Average lead time (`lead_time_avg_sec`)
 
 **Formula**
 
-\[
-\bar{W} = \frac{1}{N} \sum_{j=1}^N (t_j^{\text{finish}} - t_j^{\text{release}})
-\]
+$$
+\bar{W} = \frac{1}{N} \sum_{j=1}^{N} 
+\bigl(t_j^{\text{finish}} - t_j^{\text{release}}\bigr)
+$$
 
 With Little’s Law:
 
-\[
+$$
 \bar{L} = \theta \cdot \bar{W}
-\]
+$$
+
+where \(\theta\) is the throughput.
 
 **Meaning**
 
 Average time a job spends in the system from release to completion.  
-**Shorter, more stable lead times → better responsiveness.**
+Shorter and more stable lead times indicate better responsiveness.
 
 ---
 
-### **▪ Utilization (`utilization_per_team`)**
+### ▪ Utilization (`utilization_per_team`)
 
 **Formula**
 
-\[
+$$
 \rho_i = \frac{U_i(t)}{t}
-\]
+$$
 
-where \(U_i(t)\) is total busy time of team \(i\).
+where \(U_i(t)\) is the total busy time of team \(i\) over horizon \(t\).
 
 **Meaning**
 
-Shows how loaded each workstation is.  
-**Utilization above 0.85 indicates a potential bottleneck.**
+Shows how loaded each workstation/team is.  
+High utilization (e.g. \(\rho_i > 0.85\)) indicates a potential bottleneck,  
+while very low utilization suggests overstaffing or poor line balancing.
+
+
 
 ---
 
@@ -233,14 +238,18 @@ High blocking → downstream constrained
 
 ---
 
-### **▪ Defect rate (future KPI)**  
-\[
-\text{Defect rate} = \frac{\text{defective jobs}}{\text{total processed jobs}}
-\]
+### ▪ Defect rate (future KPI)
 
-**Note:**  
-The simulator includes defect and rework logic,  
-**but does *not* yet compute or output a formal defect-rate KPI.**  
+**Formula**
+
+$$
+\text{Defect rate} = \frac{\text{defective jobs}}{\text{total processed jobs}}
+$$
+
+**Note**
+
+The simulator already includes defect and rework logic,
+but does not yet compute or output a formal defect-rate KPI.  
 This KPI will be implemented in the next development stage.
 
 
