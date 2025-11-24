@@ -251,7 +251,7 @@ $$
 **Note**
 
 The simulator already includes defect and rework logic,
-but does not yet compute or output a formal defect-rate KPI.  
+but we do not yet compute or output a formal defect-rate KPI.  
 This KPI will be implemented in the next development stage.
 
 
