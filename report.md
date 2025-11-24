@@ -29,7 +29,7 @@ python env.py
 
 Notes
 - We currently use push strategy (no CONWIP). Use the sidebar to set orders to release.
-- Randomness is enabled by default; you can toggle Deterministic processing in the UI.
+- Randomness is enabled by default; we can toggle Deterministic processing in the UI.
 - `Environment.xlsx` is no longer used at runtime; parameters live in `env.py`'s `CONFIG`.
 
 ---
