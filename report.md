@@ -1,3 +1,10 @@
+## Project Overview
+
+In this project we build a discrete-event simulator for a LEGO-based lean production line.  
+The model represents five stages (Type Sorting, Set Sorting, Axis Assembly, Chassis Assembly, Final Assembly) and seven buffers, with one team assigned to each stage.  
+The current implementation focuses on a push system without CONWIP: orders are released in batches and flow through the system according to processing times, routing rules and random disruptions.  
+Our goal in this first iteration is to (i) implement a transparent DES engine, (ii) encode the LEGO line as a configurable environment in `env.py`, and (iii) define KPIs such as throughput, WIP, lead time and utilization that we will use in later experiments.  
+
 #first-report
 # LEGO Lean Production — Simulator (Push, DES)
 
