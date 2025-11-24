@@ -133,9 +133,15 @@ Shift constraint: postpone if α(t)=0.
 
 ## 6) KPIs
 
-- **Throughput** θ = lim C(t)/t  
-- **Average WIP** L̄ = (1/t)∫₀ᵗ L(s) ds  
-- **Average lead time** W̄ with L̄ = θ·W̄ (Little’s Law)  
+- **Throughput (`throughput_per_sec`)**  
+  Number of finished units per second, computed as `finished_units / sim_time_sec`.  
+  In practice we often convert this to units/hour by multiplying by 3600. Throughput is our primary measure of system capacity.  
+- **Average WIP (`wip_avg_units`)**  L̄ = (1/t)∫₀ᵗ L(s) ds
+  Time-averaged work-in-process inside the system. Directly linked to lead time via Little’s Law and a key Lean indicator (too high WIP → long lead times and instability).
+
+- **Average lead time** W̄ with L̄ = θ·W̄ (Little’s Law)
+  Mean time a job spends in the system (from release to completion), in seconds. This captures responsiveness: lower and more stable lead times are desirable.
+
 - **Utilization** ρ<sub>i</sub> = U<sub>i</sub>(t)/t  
 - **Blocking/starvation counts**  
 - **Defect rate** = defective / total processed  
