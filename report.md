@@ -139,7 +139,6 @@ Shift constraint: postpone if α(t)=0.
 ---
 
 ## 6) KPIs
-## 6) KPIs
 
 Below are the Key Performance Indicators reported by the simulator.  
 Each KPI is defined mathematically and explained in terms of why it matters for system performance.
