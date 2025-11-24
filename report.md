@@ -148,8 +148,10 @@ Each KPI is defined mathematically and explained in terms of why it matters for 
 **Formula**
 
 $$
-\text{Throughput} = \frac{\text{finished\_units}}{\text{sim\_time\_sec}}
+\text{Throughput} = 
+\frac{\text{finished units}}{\text{simulation time (sec)}}
 $$
+
 
 **Meaning**
 
