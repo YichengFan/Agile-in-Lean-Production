@@ -139,28 +139,111 @@ Shift constraint: postpone if α(t)=0.
 ---
 
 ## 6) KPIs
+## 6) KPIs
 
-- **Throughput (`throughput_per_sec`)**  
-  Number of finished units per second, computed as `finished_units / sim_time_sec`.  
-  In practice we often convert this to units/hour by multiplying by 3600. Throughput is our primary measure of system capacity.  
-- **Average WIP (`wip_avg_units`)**  L̄ = (1/t)∫₀ᵗ L(s) ds
-  Time-averaged work-in-process inside the system. Directly linked to lead time via Little’s Law and a key Lean indicator (too high WIP → long lead times and instability).
+Below are the Key Performance Indicators reported by the simulator.  
+Each KPI is defined mathematically and explained in terms of why it matters for system performance.
 
-- **Average lead time** W̄ with L̄ = θ·W̄ (Little’s Law)
-  Mean time a job spends in the system (from release to completion), in seconds. This captures responsiveness: lower and more stable lead times are desirable.
+---
 
-- **Utilization** ρ<sub>i</sub> = U<sub>i</sub>(t)/t
- 
-**High utilization (ρ > 0.85) indicates a potential bottleneck.**  
-- **Blocking/starvation counts**
-- **Starvation** = stage wants to start but has no input  
-- **Blocking** = stage completes but the output buffer is full  
-    Both are counted per stage.  
-**They help diagnose flow imbalance, buffer sizing issues, and routing problems.**  
-- **Defect rate** = defective / total processed
-The simulation includes defect logic (scrap or rework),  
-but **in the current implementation we do not compute a formal defect-rate KPI**.  
+### **▪ Throughput (`throughput_per_sec`)**
 
+**Formula**
+
+\[
+\text{Throughput} = \frac{\text{finished\_units}}{\text{sim\_time\_sec}}
+\]
+
+**Meaning**
+
+Number of finished units per second.  
+Often converted to units/hour by multiplying by 3600.  
+**This is the primary indicator of system capacity.**
+
+---
+
+### **▪ Average WIP (`wip_avg_units`)**
+
+**Formula**
+
+\[
+\bar{L} = \frac{1}{t} \int_0^t L(s)\,ds
+\]
+
+where \(L(s)\) is Work-In-Process at time \(s\).
+
+**Meaning**
+
+Time-averaged WIP inside the system.  
+Directly linked to lead time via Little’s Law.  
+**High WIP → long lead times & unstable flow.**
+
+---
+
+### **▪ Average lead time (`lead_time_avg_sec`)**
+
+**Formula**
+
+\[
+\bar{W} = \frac{1}{N} \sum_{j=1}^N (t_j^{\text{finish}} - t_j^{\text{release}})
+\]
+
+With Little’s Law:
+
+\[
+\bar{L} = \theta \cdot \bar{W}
+\]
+
+**Meaning**
+
+Average time a job spends in the system from release to completion.  
+**Shorter, more stable lead times → better responsiveness.**
+
+---
+
+### **▪ Utilization (`utilization_per_team`)**
+
+**Formula**
+
+\[
+\rho_i = \frac{U_i(t)}{t}
+\]
+
+where \(U_i(t)\) is total busy time of team \(i\).
+
+**Meaning**
+
+Shows how loaded each workstation is.  
+**Utilization above 0.85 indicates a potential bottleneck.**
+
+---
+
+### **▪ Blocking and starvation counts**
+
+**Definitions**
+
+- **Starvation**: a stage attempts to start but at least one required input buffer is empty  
+- **Blocking**: a stage finishes processing but the output buffer is full  
+
+Both are counted per stage.
+
+**Meaning**
+
+These counts diagnose flow imbalance, routing issues, and buffer sizing problems.  
+High starvation → upstream slow  
+High blocking → downstream constrained
+
+---
+
+### **▪ Defect rate (future KPI)**  
+\[
+\text{Defect rate} = \frac{\text{defective jobs}}{\text{total processed jobs}}
+\]
+
+**Note:**  
+The simulator includes defect and rework logic,  
+**but does *not* yet compute or output a formal defect-rate KPI.**  
+This KPI will be implemented in the next development stage.
 
 
 ---
