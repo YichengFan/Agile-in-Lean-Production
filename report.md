@@ -137,7 +137,6 @@ Shift constraint: postpone if α(t)=0.
 - **Average WIP** L̄ = (1/t)∫₀ᵗ L(s) ds  
 - **Average lead time** W̄ with L̄ = θ·W̄ (Little’s Law)  
 - **Utilization** ρ<sub>i</sub> = U<sub>i</sub>(t)/t  
-- **Service level**: on-time fraction  
 - **Blocking/starvation counts**  
 - **Defect rate** = defective / total processed  
 
