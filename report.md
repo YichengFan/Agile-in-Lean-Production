@@ -223,12 +223,12 @@ while very low utilization suggests overstaffing or poor line balancing.
 
 ---
 
-### **▪ Blocking and starvation counts**
+### **▪ Bottleneck-Blocking and starvation counts**
 
 **Definitions**
 
-- **Starvation**: a stage attempts to start but at least one required input buffer is empty  
-- **Blocking**: a stage finishes processing but the output buffer is full  
+- **Bottlenck(Starvation)**: a stage attempts to start but at least one required input buffer is empty  
+- **Bottlenck(Blocking)**: a stage finishes processing but the output buffer is full  
 
 Both are counted per stage.
 
