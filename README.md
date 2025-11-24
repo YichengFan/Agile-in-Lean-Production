@@ -120,14 +120,82 @@ Shift constraint: postpone if α(t)=0.
 ---
 
 ## 6) KPIs
+## 6) KPIs
 
-- **Throughput** θ = lim C(t)/t  
-- **Average WIP** L̄ = (1/t)∫₀ᵗ L(s) ds  
-- **Average lead time** W̄ with L̄ = θ·W̄ (Little’s Law)  
-- **Utilization** ρ<sub>i</sub> = U<sub>i</sub>(t)/t  
-- **Service level**: on-time fraction  
-- **Blocking/starvation counts**  
-- **Defect rate** = defective / total processed  
+Below are the Key Performance Indicators (KPIs) we use to evaluate the performance of the LEGO production simulator.  
+Each KPI includes a simple mathematical definition and a short explanation of why it matters.
+
+---
+
+### • **Throughput**  
+Formula:  
+θ = lim C(t) / t  
+
+Meaning:  
+Throughput measures how many finished units the system produces per unit time.  
+It is the primary indicator of system capacity and directly determined by the bottleneck stage.
+
+---
+
+### • **Average WIP**  
+Formula:  
+L̄ = (1 / t) ∫₀ᵗ L(s) ds  
+
+Meaning:  
+Average work-in-process reflects system congestion.  
+High WIP → longer lead times and more variability.  
+It is directly tied to lead time through Little’s Law.
+
+---
+
+### • **Average lead time**  
+Relationship (Little’s Law):  
+L̄ = θ · W̄  
+
+Meaning:  
+Average time a job spends inside the system from release to completion.  
+Shorter and more stable lead times mean better responsiveness and smoother flow.
+
+---
+
+### • **Utilization**  
+Formula:  
+ρᵢ = Uᵢ(t) / t  
+
+Meaning:  
+Measures how busy each workstation/team is.  
+High utilization (especially > 0.85) suggests a potential bottleneck and affects throughput stability.
+
+---
+
+### • **Service level** (future KPI — will be implemented next stage)  
+Definition (conceptual):  
+on-time fraction of completed jobs  
+
+Meaning:  
+Service level reflects reliability of delivery against due dates.  
+Although not implemented yet, it is essential for evaluating customer-oriented performance.
+
+---
+
+### • **Blocking / starvation counts**  
+Meaning:  
+These indicate structural flow imbalance:
+
+- **Starvation**: a stage wants to start but upstream does not provide input  
+- **Blocking**: a stage finishes but downstream buffer is full  
+
+These KPIs help diagnose bottleneck interactions, buffer sizing issues, and routing problems.
+
+---
+
+### • **Defect rate** (future KPI — will be implemented next stage)  
+Formula (conceptual):  
+defect_rate = defective / total_processed  
+
+Meaning:  
+Although the simulation includes defect + rework behavior, it does **not yet** compute a formal defect-rate KPI.  
+In future versions, this KPI will quantify quality performance and its impact on throughput and rework load.
 
 ---
 
