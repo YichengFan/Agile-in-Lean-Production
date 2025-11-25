@@ -108,7 +108,7 @@ S2 (Set Sorting)
 | `time_distribution` | `{"type": "triangular", "p1": 3.0, "p2": 4.0, "p3": 6.0}` | Triangular distribution |
 | `transport_time_sec` | `0.4` | Transport time (seconds) |
 | `defect_rate` | `0.02` | Defect rate (2%) |
-| `rework_stage_id` | `None` | No rework (defective items scrapped) |
+| `rework_stage_id` | `S3` | Rework back to self |
 
 **Actual Processing Time**:
 - Base time = 4.0 / 2 = 2.0 sec/unit
@@ -130,7 +130,7 @@ S2 (Set Sorting)
 | `time_distribution` | `{"type": "triangular", "p1": 3.0, "p2": 4.0, "p3": 6.0}` | Triangular distribution |
 | `transport_time_sec` | `0.4` | Transport time (seconds) |
 | `defect_rate` | `0.02` | Defect rate (2%) |
-| `rework_stage_id` | `None` | No rework (defective items scrapped) |
+| `rework_stage_id` | `S4` | Rework back to self |
 
 **Actual Processing Time**:
 - Base time = 4.0 / 2 = 2.0 sec/unit
@@ -152,7 +152,7 @@ S2 (Set Sorting)
 | `time_distribution` | `{"type": "triangular", "p1": 5.0, "p2": 6.0, "p3": 9.0}` | Triangular distribution |
 | `transport_time_sec` | `0.5` | Transport time (seconds) |
 | `defect_rate` | `0.03` | Defect rate (3%) |
-| `rework_stage_id` | `None` | No rework (defective items scrapped) |
+| `rework_stage_id` | `S5` | Rework back to self |
 
 **Multi-input Synchronization Logic**:
 - S5 can only start processing when **all input buffers have inventory**
