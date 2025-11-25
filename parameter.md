@@ -108,7 +108,7 @@ S2 (Set Sorting)
 | `time_distribution` | `{"type": "triangular", "p1": 3.0, "p2": 4.0, "p3": 6.0}` | 三角分布 |
 | `transport_time_sec` | `0.4` | 运输时间（秒） |
 | `defect_rate` | `0.02` | 缺陷率（2%） |
-| `rework_stage_id` | `None` | 无返工（缺陷品报废） |
+| `rework_stage_id` | `S3` | 返工回到自身 |
 
 **实际处理时间**:
 - 基础时间 = 4.0 / 2 = 2.0 秒/件
@@ -130,7 +130,7 @@ S2 (Set Sorting)
 | `time_distribution` | `{"type": "triangular", "p1": 3.0, "p2": 4.0, "p3": 6.0}` | 三角分布 |
 | `transport_time_sec` | `0.4` | 运输时间（秒） |
 | `defect_rate` | `0.02` | 缺陷率（2%） |
-| `rework_stage_id` | `None` | 无返工（缺陷品报废） |
+| `rework_stage_id` | `S4` | 返工回到自身 |
 
 **实际处理时间**:
 - 基础时间 = 4.0 / 2 = 2.0 秒/件
@@ -152,7 +152,7 @@ S2 (Set Sorting)
 | `time_distribution` | `{"type": "triangular", "p1": 5.0, "p2": 6.0, "p3": 9.0}` | 三角分布 |
 | `transport_time_sec` | `0.5` | 运输时间（秒） |
 | `defect_rate` | `0.03` | 缺陷率（3%） |
-| `rework_stage_id` | `None` | 无返工（缺陷品报废） |
+| `rework_stage_id` | `S5` | 返工回到自身 |
 
 **多输入同步逻辑**:
 - S5 只有在 **所有输入缓冲区都有库存** 时才能开始处理
