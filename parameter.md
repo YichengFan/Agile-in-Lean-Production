@@ -301,23 +301,24 @@ S2 (Set Sorting)
 **逻辑步骤**:
 1. 释放团队 (`team.stop_busy(t)`)
 2. **缺陷处理**:
+   - 增加self.stage_defect_counts，
    - 如果发生缺陷（概率 = `defect_rate`）:
      - 如果有 `rework_stage_id` → 触发返工阶段的 `try_start`
      - 否则 → 报废（`current_wip -= 1`）
    - 如果无缺陷 → 继续输出
-3. **输出路由**:
+4. **输出路由**:
    - 如果 `output_buffer` 存在 → 使用该缓冲区
    - 如果 `output_rules` 存在:
      - **随机模式**: 按概率随机选择
      - **确定性模式**: 使用平衡算法（选择服务次数/概率比值最小的输出）
-4. **推送输出**:
+5. **推送输出**:
    - 尝试推送到选定的输出缓冲区
    - 如果缓冲区满 → 增加 `blocking_counts`，延迟 0.5 秒后重试 `complete`
    - 如果成功:
      - 如果输出缓冲区在 `finished_buffers` 中 → `finished += 1`, `current_wip -= 1`, 记录提前期
      - 增加 `stage_completed_counts[stage_id]`
      - 更新路由服务计数（确定性模式）
-5. **唤醒下游**:
+6. **唤醒下游**:
    - 标记 `stage.busy = False`
    - **源阶段**: 如果 `source_stage_orders[stage_id] > 0`，立即触发 `try_start`
    - **非源阶段**: 立即触发 `try_start`（尝试处理下一件）
@@ -342,6 +343,9 @@ S2 (Set Sorting)
 | `utilization_per_team` | `team.busy_time / sim_time` | **团队利用率**（每个团队） |
 | `finished_units` | `self.finished` | **完成产品数** |
 | `started_units` | `self.started` | **已释放订单数** |
+| `service_level` | `self.finished / self.started` | **服务等级** |
+| `defect_rate_per_stage` | `self.stage_defect_counts / self.stage_completed_counts + self.stage_defect_counts` | **各阶段次品率** |
+| `total_defect_rate` | `total_defects / total_processed` | **生产线次品率**|
 
 ### 阶段级 KPI
 
@@ -350,6 +354,7 @@ S2 (Set Sorting)
 | `stage_completed_counts` | **每个阶段完成的次数**（字典：`{stage_id: count}`） |
 | `starvation_counts` | **每个阶段饥饿的次数**（等待输入材料） |
 | `blocking_counts` | **每个阶段阻塞的次数**（输出缓冲区满，无法推送） |
+| `defect_defect_counts` | **每个阶段次品的次数** ｜
 
 ### 时间序列数据 (`timeline`)
 
