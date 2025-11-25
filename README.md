@@ -120,7 +120,6 @@ Shift constraint: postpone if α(t)=0.
 ---
 
 ## 6) KPIs
-## 6) KPIs
 
 Below are the Key Performance Indicators (KPIs) we use to evaluate the performance of the LEGO production simulator.  
 Each KPI includes a simple mathematical definition and a short explanation of why it matters.
@@ -168,13 +167,14 @@ High utilization (especially > 0.85) suggests a potential bottleneck and affects
 
 ---
 
-### • **Service level** (future KPI — will be implemented next stage)  
-Definition (conceptual):  
-on-time fraction of completed jobs  
+### • **Service level** 
+Formula:
+
+$SL = \frac{N_{\text{fin}}(t)}{N_{\text{target}}}$
 
 Meaning:  
-Service level reflects reliability of delivery against due dates.  
-Although not implemented yet, it is essential for evaluating customer-oriented performance.
+Service level reflects reliability of delivery against planned amount.
+
 
 ---
 
@@ -189,13 +189,16 @@ These KPIs help diagnose bottleneck interactions, buffer sizing issues, and rout
 
 ---
 
-### • **Defect rate** (future KPI — will be implemented next stage)  
-Formula (conceptual):  
-defect_rate = defective / total_processed  
+### • **Defect rate** 
+Formula:
+
+$DR_i = \frac{N_i^{\text{def}}}{N_i^{\text{def}} + N_i^{\text{ok}}}$
+
+$DR_{\text{total}} = \frac{\sum_i N_i^{\text{def}}}{\sum_i (N_i^{\text{def}} + N_i^{\text{ok}})}$
+
 
 Meaning:  
-Although the simulation includes defect + rework behavior, it does **not yet** compute a formal defect-rate KPI.  
-In future versions, this KPI will quantify quality performance and its impact on throughput and rework load.
+Defect in each stage will be recorded, defect rate for each stage will be computed as well as the total defect rate, thus easier for tracking performances.
 
 ---
 
@@ -239,6 +242,9 @@ CONWIP: K controls θ(K) and W̄(K)=L̄(K)/θ(K). Tune K to balance throughput/l
 | α(t) | `shift_schedule` |
 | π<sub>miss</sub>, m | `random_events` |
 | K | `parameters.conwip_cap` |
+| $N_{\text{fin}}(t)$, $N_{\text{target}}$ | `self.finished`, `self.started` |
+| $N_i^{\text{def}}$, $N_i^{\text{ok}}$ | `stage_defect_counts`, `stage_completed_counts` |
+
 
 ---
 
