@@ -302,6 +302,7 @@ S2 (Set Sorting)
 1. Release team (`team.stop_busy(t)`)
 2. **Defect Handling**:
    - If defect occurs (probability = `defect_rate`):
+   - Add self.stage_defect_counts,
      - If `rework_stage_id` exists → Trigger `try_start` at rework stage
      - Otherwise → Scrap (`current_wip -= 1`)
    - If no defect → Continue to output
@@ -342,6 +343,9 @@ S2 (Set Sorting)
 | `utilization_per_team` | `team.busy_time / sim_time` | **Team utilization** (per team) |
 | `finished_units` | `self.finished` | **Completed products** |
 | `started_units` | `self.started` | **Released orders** |
+| `service_level` | `self.finished / self.started` | **Service level achieved** |
+| `defect_rate_per_stage` | `self.stage_defect_counts / self.stage_completed_counts + self.stage_defect_counts` | **Defect rate for each stage** |
+| `total_defect_rate` | `total_defects / total_processed` | **Total production defect rate**|
 
 ### Stage-level KPIs
 
@@ -350,6 +354,7 @@ S2 (Set Sorting)
 | `stage_completed_counts` | **Completion count for each stage** (dictionary: `{stage_id: count}`) |
 | `starvation_counts` | **Starvation count for each stage** (waiting for input materials) |
 | `blocking_counts` | **Blocking count for each stage** (output buffer full, cannot push) |
+| `defect_defect_counts` | **Defect count for each stage** |
 
 ### Time Series Data (`timeline`)
 
