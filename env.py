@@ -289,7 +289,7 @@ class LegoLeanEnv:
         self.stage_completed_counts: Dict[Any, int] = {s_id: 0 for s_id in self.stages}
         self.starvation_counts: Dict[Any, int] = {s_id: 0 for s_id in self.stages}
         self.blocking_counts: Dict[Any, int] = {s_id: 0 for s_id in self.stages}
-        
+        self.stage_defect_counts: Dict[Any, int] = {s_id: 0 for s_id in self.stages}
         # Order tracking for source stages (push mode)
         self.source_stage_orders: Dict[Any, int] = {
             s_id: 0 for s_id, s in self.stages.items() if not s.input_buffers
@@ -421,7 +421,28 @@ class LegoLeanEnv:
         throughput = self.finished / sim_time
         lead_time_avg = sum(self.lead_times) / len(self.lead_times) if self.lead_times else 0.0
         wip_avg = self.wip_time_area / sim_time
+        service_level = self.finished / self.started
         utilization = {}
+        """Defect KPI calculation"""
+        defect_rate_per_stage = {}
+        total_defects = 0
+        total_processed = 0
+
+        for s_id in self.stages:
+            defects = self.stage_defect_counts.get(s_id, 0)
+            completed = self.stage_completed_counts.get(s_id, 0)
+            total = defects + completed
+            if total > 0:
+                defect_rate_per_stage[s_id] = round(defects / total, 3)
+            else:
+                defect_rate_per_stage[s_id] = 0.0
+
+            total_defects += defects
+            total_processed += total
+        """Overall defect rate (aggregated)"""
+
+        total_defect_rate = round(total_defects / total_processed, 3) if total_processed > 0 else 0.0
+
         for team_id, team in self.teams.items():
             # If currently busy, close interval temporally for utilization calculation
             if team.last_busy_start is not None:
@@ -439,6 +460,10 @@ class LegoLeanEnv:
             "stage_completed_counts": self.stage_completed_counts,
             "starvation_counts": self.starvation_counts,
             "blocking_counts": self.blocking_counts,
+            "service_level": service_level,
+            "stage_defect_counts": self.stage_defect_counts,
+            "defect_rate_per_stage": defect_rate_per_stage,
+            "total_defect_rate": total_defect_rate,
         }
 
     # --------------------------------------------------------------------------
@@ -515,6 +540,8 @@ class LegoLeanEnv:
         # Defect handling (rework or scrap)
         proceed_to_output = True
         if stage.defect_rate and random.random() < stage.defect_rate:
+            """Defect counts logic"""
+            self.stage_defect_counts[stage.stage_id] = self.stage_defect_counts.get(stage.stage_id, 0) + 1
             if stage.rework_stage_id and stage.rework_stage_id in self.stages:
                 self._push_event(self.t, "try_start", {"stage_id": stage.rework_stage_id})
                 proceed_to_output = False
