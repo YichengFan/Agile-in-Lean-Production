@@ -354,7 +354,7 @@ S2 (Set Sorting)
 | `stage_completed_counts` | **每个阶段完成的次数**（字典：`{stage_id: count}`） |
 | `starvation_counts` | **每个阶段饥饿的次数**（等待输入材料） |
 | `blocking_counts` | **每个阶段阻塞的次数**（输出缓冲区满，无法推送） |
-| `defect_defect_counts` | **每个阶段次品的次数** ｜
+| `defect_defect_counts` | **每个阶段次品的次数** 
 
 ### 时间序列数据 (`timeline`)
 
