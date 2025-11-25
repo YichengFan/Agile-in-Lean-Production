@@ -768,6 +768,7 @@ CONFIG: Dict[str, Any] = {
             "time_distribution": {"type": "triangular", "p1": 3.0, "p2": 4.0, "p3": 6.0},
             "transport_time_sec": 0.4,
             "defect_rate": 0.02,
+            "rework_stage_id": "S3",
             "workers": 2                       # number of workers
         },
         {
@@ -780,6 +781,7 @@ CONFIG: Dict[str, Any] = {
             "time_distribution": {"type": "triangular", "p1": 3.0, "p2": 4.0, "p3": 6.0},
             "transport_time_sec": 0.4,
             "defect_rate": 0.02,
+            "rework_stage_id": "S4",
             "workers": 2                       # number of workers
         },
         {
@@ -792,6 +794,7 @@ CONFIG: Dict[str, Any] = {
             "time_distribution": {"type": "triangular", "p1": 5.0, "p2": 6.0, "p3": 9.0},
             "transport_time_sec": 0.5,
             "defect_rate": 0.03,
+            "rework_stage_id": "S5",
             "workers": 3                       # number of workers
         },
     ],
