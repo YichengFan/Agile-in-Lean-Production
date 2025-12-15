@@ -1,0 +1,28 @@
+Baseline Model (Core Logic Only)
+1) Flow and Stations
+Single push line, deterministic routing, single product.
+Sequence:
+S1 (Type Sorting, raw mixed parts from A) → B (sorted parts) →
+S2 (Kit Build) → C1/C2/C3 (kits) →
+S3 (Axis Assembly, C1→D1), S4 (Chassis Assembly, C2→D2) →
+S5 (Final Assembly, D1 + D2 + C3 → E).
+Buffers: A (raw), B (sorted), C1/C2/C3 (kits), D1/D2 (subassemblies), E (finished). Large or infinite capacity.
+2) BOM (deterministic)
+S1 consumes a fixed BOM from A and outputs the same items into B (classification).
+S2 consumes the same BOM from B and outputs: C1: bun01, C2: bun02, C3: bun03 (one kit each).
+S3: consumes bun01 → outputs D1: saa01.
+S4: consumes bun02 → outputs D2: sac01.
+S5: consumes bun03 + saa01 + sac01 → outputs E: fg01.
+(Use the default quantities defined in env.py; no probabilistic splits.)
+3) Timing and Resources
+One team per station; workers as default (S1=2, S2=2, S3=2, S4=2, S5=3).
+Processing time: default triangular distributions per station; transport times as default.
+No randomness: deterministic processing, missing_brick_prob = 0, defects off if needed.
+4) Shift and Control
+Single shift 08:00–16:00 (as in default config).
+Push release: release a given number of orders at t=0 to source S1.
+5) KPIs to check
+Throughput (θ), WIP, Lead time (Little’s Law consistency), Utilization, Buffer levels.
+Aim: confirm base logic correctness, not optimization.
+6) What is excluded for the baseline
+Probabilistic routing, dynamic routing, CONWIP/advanced WIP control, random disruptions, defects/rework, cost/profit accounting, assembly trace export, extra logging.
