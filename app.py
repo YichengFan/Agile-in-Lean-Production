@@ -118,8 +118,9 @@ with c2:
 
 st.markdown("---")
 st.subheader("Initial Buffer Stocks")
-bcols = st.columns(7)
-for i, bid in enumerate(["A", "B", "C1", "C2", "C3", "D1", "D2", "E"]):
+buffer_ids = ["A", "B", "C1", "C2", "C3", "D1", "D2", "E"]
+bcols = st.columns(len(buffer_ids))
+for i, bid in enumerate(buffer_ids):
     with bcols[i]:
         b = buffer_by_id(cfg, bid)
         default_str = json.dumps(b.get("initial_stock", {}), indent=0)
@@ -153,7 +154,7 @@ if st.button("Run Simulation"):
         env.enqueue_orders(qty=int(orders_to_release))
     for s in env.stages.values():
         env._push_event(env.t, "try_start", {"stage_id": s.stage_id})
-    env.run_for(float(sim_time))
+    env.run_for(float(sim_time), max_events=1_000_000)
     t1 = time.time()
 
     st.success(f"Simulation finished in {t1 - t0:.3f} sec (wall).")

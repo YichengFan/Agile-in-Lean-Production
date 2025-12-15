@@ -247,8 +247,6 @@ class LegoLeanEnv:
                 name=s.get("name") or str(s_id),
                 team_id=s.get("team_id"),
                 input_buffers=in_bufs,
-                output_buffer=s.get("output_buffer"),
-                output_rules=s.get("output_rules"),
                 required_materials=s.get("required_materials") or {},
                 output_buffers=s.get("output_buffers") or {},
                 base_process_time_sec=float(s.get("base_process_time_sec") or 1.0),
@@ -289,7 +287,7 @@ class LegoLeanEnv:
         self.cost_inventory: float = 0.0
         self.cost_other: float = 0.0
         self.buffer_time_area: Dict[Any, float] = {b_id: 0.0 for b_id in self.buffers}
-        self.last_buffer_time: float = self.t
+        self.last_buffer_time: float = 0.0
         # Event queue and time
         self._evt_seq = 0
         self._queue: List[Event] = []
@@ -439,6 +437,18 @@ class LegoLeanEnv:
     def run_for(self, dt: float, max_events: int = 100000):
         """Run the simulation for dt seconds from current time."""
         self.run_until(self.t + dt, max_events=max_events)
+
+    def run_until(self, t_stop: float, max_events: int = 1000000):
+        """Run the simulation until time reaches t_stop or event cap is hit."""
+        count = 0
+        while self._queue and count < max_events:
+            if self._queue[0].time > t_stop:
+                break
+            self.step()
+            count += 1
+        # Only fast-forward if we naturally reached t_stop or queue is empty
+        if count < max_events or not self._queue:
+            self._on_time_advance(t_stop)
 
     # --------------------------------------------------------------------------
     # KPI accumulation
