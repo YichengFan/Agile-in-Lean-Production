@@ -1,4 +1,4 @@
-# LEGO Lean Production — Simulator (Push, DES)
+# LEGO Lean Production — Simulation Model (Push, DES)
 
 ## Quick Start
 
@@ -27,7 +27,15 @@ Notes
 
 ---
 
-# Mathematical Model (v0.1)
+## Mathematical Model
+
+For the **mathematical model** (objective function, decision variables, constraints, cost formulations), please refer to [`mathematical_model.md`](mathematical_model.md).
+
+This document focuses on the **simulation model** implementation details.
+
+---
+
+# Simulation Model (Discrete-Event Simulation)
 
 ## 1) Sets, Indices, Graph
 
@@ -53,7 +61,6 @@ Notes
 - **Time distribution descriptor**: D<sub>i</sub> = (type, p<sub>i1</sub>, p<sub>i2</sub>, p<sub>i3</sub>)  
 - **Defect probability**: q<sub>i</sub> ∈ [0, 1]  
 - **Rework routing**: defective items at *i* go to r(i) ∈ S or are scrapped  
-- **Routing probabilities (S₂)**: P<sub>2→C1</sub>, P<sub>2→C2</sub>, P<sub>2→C3</sub> with Σp = 1  
 - **Buffer capacity**: cap<sub>b</sub> ∈ ℕ ∪ {∞}  
 - **Shift availability** α(t) ∈ {0, 1} (1 = working, 0 = off)  
 - **Random disruption (missing bricks)**:  
@@ -104,15 +111,15 @@ X<sub>D1</sub> ≥ 1 and X<sub>D2</sub> ≥ 1 and X<sub>C3</sub> ≥ 1.
 - Else: release per λ or manual  
 - Each release triggers “try_start” at a source stage; L(t) += 1
 
-**Try-start at stage i**  
-- If Y<sub>i</sub> = 0 and all inputs available:  
-  pull 1 unit from each b; set Y<sub>i</sub> = 1; sample S<sub>i</sub>; schedule completion t+S<sub>i</sub>  
+**Try-start at stage i (BOM deterministic)**  
+- If Y<sub>i</sub> = 0 and required_materials are all available (from any listed input buffer):  
+  pull each required item/qty; set Y<sub>i</sub> = 1; sample S<sub>i</sub>; schedule completion t+S<sub>i</sub>  
 - Else: retry after ε
 
-**Completion at stage i**  
+**Completion at stage i (BOM deterministic)**  
 - Stop U<sub>i</sub>  
 - With prob q<sub>i</sub>: defect → rework or scrap (L–1)  
-- Else: push to output; if blocked retry; if sink → finished C+1, L–1  
+- Else: push deterministic outputs (output_buffers). If blocked retry; if sink/finished buffer → finished C+1, L–1  
 - Set Y<sub>i</sub> = 0; trigger downstream “try_start”  
 
 Shift constraint: postpone if α(t)=0.
@@ -167,10 +174,8 @@ High utilization (especially > 0.85) suggests a potential bottleneck and affects
 
 ---
 
-### • **Service level** 
-Formula:
-
-$SL = \frac{N_{\text{fin}}(t)}{N_{\text{target}}}$
+### • **Service level**
+Formula: SL = N<sub>fin</sub>(t) / N<sub>target</sub>
 
 Meaning:  
 Service level reflects reliability of delivery against planned amount.
@@ -189,12 +194,8 @@ These KPIs help diagnose bottleneck interactions, buffer sizing issues, and rout
 
 ---
 
-### • **Defect rate** 
-Formula:
-
-$DR_i = \frac{N_i^{\text{def}}}{N_i^{\text{def}} + N_i^{\text{ok}}}$
-
-$DR_{\text{total}} = \frac{\sum_i N_i^{\text{def}}}{\sum_i (N_i^{\text{def}} + N_i^{\text{ok}})}$
+### • **Defect rate**
+Formula: DR<sub>i</sub> = N<sub>i,def</sub> / (N<sub>i,def</sub> + N<sub>i,ok</sub>); DR<sub>total</sub> = Σ N<sub>i,def</sub> / Σ (N<sub>i,def</sub> + N<sub>i,ok</sub>)
 
 
 Meaning:  
@@ -222,43 +223,66 @@ CONWIP: K controls θ(K) and W̄(K)=L̄(K)/θ(K). Tune K to balance throughput/l
 
 - Staffing (team sizes)  
 - WIP caps (global K or per-buffer Kanban)  
-- Routing split at S₂ (P<sub>2→C1</sub>, P<sub>2→C2</sub>, P<sub>2→C3</sub>)  
 - Release policy (push vs pull)  
 - Time variance reduction (c<sub>s</sub><sup>2</sup>)  
 - Layout / transport reduction (δ<sub>i</sub>)
 
 ---
 
-## 9) Calibration → `env.py`
+## 9) Simulation Implementation Mapping
 
-| Model Element | env.py Mapping |
+| Simulation Element | `env.py` Implementation |
 |----------------|----------------|
 | τ<sub>i</sub>, D<sub>i</sub> | `base_process_time_sec`, `time_distribution` |
 | w<sub>i</sub> | `workers` |
 | δ<sub>i</sub> | `transport_time_sec` |
 | q<sub>i</sub>, r(i) | `defect_rate`, `rework_stage_id` |
-| P<sub>routing</sub> | `output_rules` (e.g. S2→C1/C2/C3) |
+| BOM inputs | `required_materials` + `input_buffers` |
+| BOM outputs | `output_buffers` (deterministic itemized outputs) |
 | Multi-input | `input_buffers=["D1","D2","C3"]` |
 | α(t) | `shift_schedule` |
 | π<sub>miss</sub>, m | `random_events` |
 | K | `parameters.conwip_cap` |
-| $N_{\text{fin}}(t)$, $N_{\text{target}}$ | `self.finished`, `self.started` |
-| $N_i^{\text{def}}$, $N_i^{\text{ok}}$ | `stage_defect_counts`, `stage_completed_counts` |
-
+| N<sub>fin</sub>(t), N<sub>target</sub> | `self.finished`, `self.started` |
+| N<sub>i,def</sub>, N<sub>i,ok</sub> | `stage_defect_counts`, `stage_completed_counts` |
 
 ---
 
-## 10) Sanity Targets
+## 10) Simulation Assumptions
+
+- **Discrete-event simulation**: Events processed in chronological order using priority queue
+- **Push strategy**: Orders released at t=0 (or per release rate λ)
+- **No CONWIP**: Currently no global WIP cap (can be added)
+- **Event-driven**: `try_start` and `complete` events drive state transitions
+- **Time sampling**: KPIs sampled at intervals (`timeline_sample_dt_sec`) for visualization
+- **Random number generation**: Uses Python `random` module with optional seed
+- **Deterministic BOM flow**: No probabilistic routing; outputs are itemized and deterministic
+
+---
+
+## 11) Cost & Profit KPIs (implemented)
+
+- Revenue = `unit_price` × finished (or capped by `demand_qty` if provided)
+- Material cost = `unit_material_cost` × actual consumed quantity (accumulated per BOM pull)
+- Labor cost = Σ (team busy time × team size × `labor_costs_per_team_sec`)
+- Inventory holding cost = Σ (∫inventory dt × `holding_costs_per_buffer_sec`)
+- Profit = Revenue − (Material + Labor + Inventory + Other)
+- Configure under `parameters.cost` in `CONFIG`.
+
+---
+
+## 12) Simulation Validation Targets
 
 - ρ<sub>i</sub> &lt; 0.85 for all stages  
-- Balanced routing P<sub>2→C1</sub>=P<sub>2→C2</sub>  
-- Start with small K and increase until throughput target is met  
+- Throughput matches analytical estimates (Kingman approximation)
+- Little's Law holds: L̄ = θ · W̄
 
 ---
 
-## Next Steps
+## 13) Next Steps
 
-1. Choose policy: Pull (CONWIP K).  
-2. Fill numbers: τ<sub>i</sub>, δ<sub>i</sub>, q<sub>i</sub>, π<sub>miss</sub>, m, routing, shifts.  
-3. Run `env.py` → KPIs, find bottleneck.  
-4. Apply Lean improvements and re-run for comparison.
+1. **Simulation**: Run `env.py` → collect KPIs, identify bottlenecks
+2. **Mathematical Model**: Use [`mathematical_model.md`](mathematical_model.md) to formulate optimization problem
+3. **Optimization**: Determine optimal Q, w<sub>i</sub>, cap<sub>b</sub>
+4. **Lean Transition**: Apply waste elimination → reduce costs → increase profit
+5. **Validation**: Compare simulation results with mathematical model predictions

@@ -89,37 +89,50 @@ def sample_time(dist: Dict[str, Any], base: float) -> float:
 
 @dataclass
 class Buffer:
-    """Finite (or infinite if capacity=None) storage for parts/products."""
+    """Finite (or infinite if capacity=None) storage for parts/products in itemized mode."""
     buffer_id: Any
     name: str
     capacity: Optional[int] = None
-    initial_stock: int = 0
+    initial_stock: Dict[str, int] = field(default_factory=dict)
 
     # internal state
-    current: int = 0
+    items: Dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
-        self.current = int(self.initial_stock or 0)
+        # itemized inventory only
+        if isinstance(self.initial_stock, dict):
+            self.items = {str(k): int(v) for k, v in self.initial_stock.items()}
+        else:
+            # if given as scalar, treat as generic items
+            qty = int(self.initial_stock or 0)
+            self.items = {f"{self.buffer_id}_item": qty} if qty > 0 else {}
 
-    def can_pull(self, qty: int = 1) -> bool:
-        return self.current >= qty
+    def can_pull_item(self, item_id: str, qty: int = 1) -> bool:
+        return self.items.get(str(item_id), 0) >= qty
 
-    def pull(self, qty: int = 1) -> bool:
-        if self.can_pull(qty):
-            self.current -= qty
-            return True
-        return False
+    def pull_item(self, item_id: str, qty: int = 1) -> Optional[Dict[str, int]]:
+        key = str(item_id)
+        if self.can_pull_item(key, qty):
+            self.items[key] -= qty
+            if self.items[key] <= 0:
+                self.items.pop(key, None)
+            return {key: qty}
+        return None
 
-    def can_push(self, qty: int = 1) -> bool:
+    def can_push_item(self, item_id: str, qty: int = 1) -> bool:
         if self.capacity is None:
             return True
-        return (self.current + qty) <= int(self.capacity)
+        return (self.total_items() + qty) <= int(self.capacity)
 
-    def push(self, qty: int = 1) -> bool:
-        if self.can_push(qty):
-            self.current += qty
-            return True
-        return False
+    def push_item(self, item_id: str, qty: int = 1) -> bool:
+        if not self.can_push_item(item_id, qty):
+            return False
+        key = str(item_id)
+        self.items[key] = self.items.get(key, 0) + qty
+        return True
+
+    def total_items(self) -> int:
+        return sum(self.items.values())
 
 
 @dataclass
@@ -147,18 +160,17 @@ class Team:
 @dataclass
 class Stage:
     """
-    Process node.
-    - Supports multiple input buffers (require 1 unit from each before starting).
-    - Supports either: a single output buffer, or probabilistic routing to one of many outputs.
-      Use 'output_buffer' (str) OR 'output_rules' (list of {'buffer_id': str, 'p': float}).
-    - workers: number of workers at this stage. Processing time = base_time / workers
+    Process node (BOM-driven, deterministic outputs).
+    - Pulls required_materials (item_id -> qty) across input buffers.
+    - Pushes deterministic outputs: output_buffers (buffer_id -> {item_id: qty}).
+    - workers: number of workers at this stage. Processing time scales with total required qty.
     """
     stage_id: Any
     name: str
     team_id: Any
     input_buffers: List[Any] = field(default_factory=list)  # e.g., ['D1', 'D2', 'C3'] for Final Assembly
-    output_buffer: Optional[Any] = None                     # single deterministic output
-    output_rules: Optional[List[Dict[str, Any]]] = None     # probabilistic outputs [{'buffer_id': 'C1', 'p': 0.4}, ...]
+    required_materials: Dict[str, int] = field(default_factory=dict)  # BOM-style requirements (item_id -> qty)
+    output_buffers: Dict[str, Dict[str, int]] = field(default_factory=dict)  # deterministic outputs with items
 
     base_process_time_sec: float = 1.0
     time_distribution: Dict[str, Any] = field(default_factory=dict)
@@ -237,6 +249,8 @@ class LegoLeanEnv:
                 input_buffers=in_bufs,
                 output_buffer=s.get("output_buffer"),
                 output_rules=s.get("output_rules"),
+                required_materials=s.get("required_materials") or {},
+                output_buffers=s.get("output_buffers") or {},
                 base_process_time_sec=float(s.get("base_process_time_sec") or 1.0),
                 time_distribution=s.get("time_distribution") or {},
                 transport_time_sec=float(s.get("transport_time_sec") or 0.0),
@@ -252,11 +266,30 @@ class LegoLeanEnv:
         self.parameters = self.cfg.get("parameters", {})
         self.random_events = self.cfg.get("random_events", {})
         self.finished_buffers = list(self.parameters.get("finished_buffer_ids", ["E"]))
-        self.routing_mode: str = str(self.parameters.get("routing_mode", "random")).lower()
-        # Routing state for deterministic mode (served counts per stage/output)
-        self._served_counts: Dict[Any, Dict[str, int]] = {}
-        self._rr_index: Dict[Any, int] = {}
-
+        self.trace_assembly: bool = bool(self.parameters.get("trace_assembly", False))
+        # Cost & revenue parameters (optional)
+        cost_cfg = self.parameters.get("cost", {})
+        self.unit_price = float(cost_cfg.get("unit_price", 0.0))
+        self.unit_material_cost = float(cost_cfg.get("unit_material_cost", 0.0))
+        self.labor_costs_per_team = {
+            str(k): float(v) for k, v in (cost_cfg.get("labor_costs_per_team_sec") or {}).items()
+        }
+        self.holding_costs_per_buffer = {
+            str(k): float(v) for k, v in (cost_cfg.get("holding_costs_per_buffer_sec") or {}).items()
+        }
+        self.demand_qty = cost_cfg.get("demand_qty")
+        if self.demand_qty is not None:
+            try:
+                self.demand_qty = int(self.demand_qty)
+            except Exception:
+                self.demand_qty = None
+        self.revenue_total: float = 0.0
+        self.cost_material: float = 0.0
+        self.cost_labor: float = 0.0
+        self.cost_inventory: float = 0.0
+        self.cost_other: float = 0.0
+        self.buffer_time_area: Dict[Any, float] = {b_id: 0.0 for b_id in self.buffers}
+        self.last_buffer_time: float = self.t
         # Event queue and time
         self._evt_seq = 0
         self._queue: List[Event] = []
@@ -279,11 +312,14 @@ class LegoLeanEnv:
         self._next_sample_t: float = self._sample_dt
         self._last_sample_finished: int = 0
         self._last_sample_time: float = 0.0
+        # Assembly traces (optional)
+        self.assembly_traces: List[Dict[str, Any]] = []
 
         # If current time not in shift, auto-align to next shift start
         if self.shifts and not self._is_in_shift(0.0):
             self.t = self._advance_to_next_shift_start(0.0)
             self.last_wip_time = self.t
+            self.last_buffer_time = self.t
 
         # KPI counters per stage
         self.stage_completed_counts: Dict[Any, int] = {s_id: 0 for s_id in self.stages}
@@ -388,7 +424,6 @@ class LegoLeanEnv:
             self.log.append(f"{self._fmt_t()} [WARN] No handler for event kind='{ev.kind}'.")
         return ev
 
-    def run_until(self, t_stop: float, max_events: int = 1000000):
         """Run the simulation until time reaches t_stop or event cap is hit."""
         count = 0
         while self._queue and count < max_events:
@@ -443,12 +478,37 @@ class LegoLeanEnv:
 
         total_defect_rate = round(total_defects / total_processed, 3) if total_processed > 0 else 0.0
 
+        labor_cost = 0.0
         for team_id, team in self.teams.items():
             # If currently busy, close interval temporally for utilization calculation
             if team.last_busy_start is not None:
                 team.stop_busy(self.t)
                 team.start_busy(self.t)
             utilization[team_id] = team.busy_time / sim_time
+            rate = self.labor_costs_per_team.get(str(team_id), 0.0)
+            labor_cost += rate * team.size * team.busy_time
+
+        # Inventory holding cost (area under inventory curves × holding rate)
+        inventory_cost = 0.0
+        for b_id, area in self.buffer_time_area.items():
+            h = self.holding_costs_per_buffer.get(str(b_id), 0.0)
+            inventory_cost += h * area
+
+        # Revenue (all finished are assumed sold unless demand cap is set)
+        sales_units = self.finished if self.demand_qty is None else min(self.finished, self.demand_qty)
+        revenue_total = self.unit_price * sales_units
+
+        cost_total = self.cost_material + labor_cost + inventory_cost + self.cost_other
+        profit = revenue_total - cost_total
+
+        avg_buffer_levels = {
+            str(b_id): (area / sim_time) if sim_time > 0 else 0.0
+            for b_id, area in self.buffer_time_area.items()
+        }
+        # Persist latest cost/revenue snapshots for external inspection
+        self.cost_labor = labor_cost
+        self.cost_inventory = inventory_cost
+        self.revenue_total = revenue_total
         return {
             "sim_time_sec": sim_time,
             "throughput_per_sec": throughput,
@@ -464,6 +524,14 @@ class LegoLeanEnv:
             "stage_defect_counts": self.stage_defect_counts,
             "defect_rate_per_stage": defect_rate_per_stage,
             "total_defect_rate": total_defect_rate,
+            "revenue_total": revenue_total,
+            "cost_material": self.cost_material,
+            "cost_labor": labor_cost,
+            "cost_inventory": inventory_cost,
+            "cost_other": self.cost_other,
+            "cost_total": cost_total,
+            "profit": profit,
+            "avg_buffer_levels": avg_buffer_levels,
         }
 
     # --------------------------------------------------------------------------
@@ -489,20 +557,31 @@ class LegoLeanEnv:
             # Consume one order
             self.source_stage_orders[stage.stage_id] -= 1
 
-        # Check all required inputs (multi-input allowed)
-        pulled_inputs: List[Buffer] = []
-        for b_id in stage.input_buffers:
-            buf = self.buffers.get(b_id)
-            if not buf or not buf.pull(1):
-                # roll back any inputs we might have pulled already
-                for pb in pulled_inputs:
-                    pb.push(1)
-                # retry later
-                self.starvation_counts[stage.stage_id] += 1
-                self.log.append(f"{self._fmt_t()} '{stage.name}' waiting: insufficient '{b_id}'.")
-                self._push_event(self.t + 0.5, "try_start", {"stage_id": stage.stage_id})
-                return
-            pulled_inputs.append(buf)
+        bom_mode = bool(stage.required_materials) or bool(stage.output_buffers)
+
+        # Check inputs (BOM mode only)
+        pulled_items: List[tuple] = []  # (buf, item_id, qty) for rollback if needed
+
+        if stage.required_materials:
+            for item_id, required_qty in stage.required_materials.items():
+                pulled = False
+                for b_id in stage.input_buffers:
+                    buf = self.buffers.get(b_id)
+                    if buf and buf.pull_item(item_id, required_qty):
+                        pulled_items.append((buf, item_id, required_qty))
+                        # Material cost on actual consumption (per item qty)
+                        # If unit_material_cost is per "order", you can instead use a per-item rate map in future.
+                        self.cost_material += self.unit_material_cost * required_qty
+                        pulled = True
+                        break
+                if not pulled:
+                    # rollback previously pulled items
+                    for pb, it, qty in pulled_items:
+                        pb.push_item(it, qty)
+                    self.starvation_counts[stage.stage_id] += 1
+                    self.log.append(f"{self._fmt_t()} '{stage.name}' waiting: insufficient '{item_id}' (need {required_qty}).")
+                    self._push_event(self.t + 0.5, "try_start", {"stage_id": stage.stage_id})
+                    return
 
         # Engage team (utilization starts)
         team = self.teams.get(stage.team_id)
@@ -512,8 +591,8 @@ class LegoLeanEnv:
         stage.busy = True
 
         # Draw processing time from distribution + optional disruption penalty
-        # base_process_time_sec is "per worker", so divide by number of workers
-        base_time_per_unit = stage.base_process_time_sec / max(1, stage.workers)
+        total_parts = sum(stage.required_materials.values()) if stage.required_materials else 1
+        base_time_per_unit = (stage.base_process_time_sec * max(1, total_parts)) / max(1, stage.workers)
         ptime = sample_time(stage.time_distribution, base_time_per_unit)
 
         # Random disruption: missing bricks → extra processing time penalty
@@ -525,6 +604,9 @@ class LegoLeanEnv:
 
         finish_t = self.t + ptime + float(stage.transport_time_sec or 0.0)
         self._push_event(finish_t, "complete", {"stage_id": stage.stage_id})
+        # Remember pulled items for BOM blocking retries
+        if bom_mode:
+            stage._pulled_items = pulled_items
 
     def _on_complete(self, ev: Event):
         """Complete processing at a stage, handle defects/rework, then push outputs."""
@@ -555,79 +637,34 @@ class LegoLeanEnv:
 
         chosen_out = None
         if proceed_to_output:
-            # Determine output buffer (single deterministic OR probabilistic rules)
-            out_buffer_id = stage.output_buffer
-            if stage.output_rules:
-                if self.routing_mode == "deterministic":
-                    rules = stage.output_rules
-                    if stage.stage_id not in self._served_counts:
-                        self._served_counts[stage.stage_id] = {}
-                    if stage.stage_id not in self._rr_index:
-                        self._rr_index[stage.stage_id] = 0
-                    served = self._served_counts[stage.stage_id]
-                    # Compute balance score: served / p. Lower is more under-served.
-                    scores = []
-                    for idx, rule in enumerate(rules):
-                        buf_id = str(rule.get("buffer_id"))
-                        p = max(1e-9, float(rule.get("p", 0.0)))
-                        c = float(served.get(buf_id, 0))
-                        score = c / p
-                        scores.append((score, idx, buf_id))
-                    scores.sort(key=lambda x: x[0])
-                    # Find all with minimal score (tie set)
-                    min_score = scores[0][0]
-                    tie = [t for t in scores if abs(t[0] - min_score) <= 1e-12]
-                    if len(tie) == 1:
-                        out_buffer_id = tie[0][2]
-                    else:
-                        # Round-robin among ties to avoid always picking first rule
-                        rr = self._rr_index[stage.stage_id] % len(tie)
-                        out_buffer_id = tie[rr][2]
-                        self._rr_index[stage.stage_id] = (self._rr_index[stage.stage_id] + 1) % len(tie)
-                else:
-                    r = random.random()
-                    cum = 0.0
-                    chosen = None
-                    for rule in stage.output_rules:
-                        cum += float(rule.get("p", 0.0))
-                        if r <= cum:
-                            chosen = rule.get("buffer_id")
-                            break
-                    out_buffer_id = chosen or out_buffer_id
-
-            if out_buffer_id:
+            all_push_success = True
+            pushed_buffers: List[str] = []
+            outputs_logged: List[tuple] = []
+            for out_buffer_id, materials in stage.output_buffers.items():
                 ob = self.buffers.get(out_buffer_id)
-                if ob and ob.push(1):
-                    self.log.append(f"{self._fmt_t()} '{stage.name}' pushed item → '{out_buffer_id}'.")
-                    chosen_out = out_buffer_id
-                    # Count as finished if pushed into a configured finished buffer
+                if not ob:
+                    self.log.append(f"{self._fmt_t()} '{stage.name}' error: missing output buffer '{out_buffer_id}'.")
+                    all_push_success = False
+                    continue
+                for item_id, qty in materials.items():
+                    if not ob.push_item(item_id, qty):
+                        # blocking
+                        self.blocking_counts[stage.stage_id] += 1
+                        self.log.append(f"{self._fmt_t()} '{stage.name}' output blocked: '{out_buffer_id}' full.")
+                        self._push_event(self.t + 0.5, "complete", {"stage_id": stage.stage_id})
+                        return
+                    pushed_buffers.append(out_buffer_id)
+                    outputs_logged.append((out_buffer_id, item_id, qty))
+                    self.log.append(f"{self._fmt_t()} '{stage.name}' pushed {qty}x '{item_id}' → '{out_buffer_id}'.")
                     if str(out_buffer_id) in [str(x) for x in self.finished_buffers]:
-                        self.finished += 1
+                        self.finished += qty
                         self.lead_times.append(self.t - 0.0)
                         self._accumulate_wip(self.t)
-                        self.current_wip = max(0, self.current_wip - 1)
+                        self.current_wip = max(0, self.current_wip - qty)
                         self.log.append(f"{self._fmt_t()} Product finished into buffer '{out_buffer_id}'. Finished={self.finished}")
-                    # Update per-stage completion counters and served counts
-                    self.stage_completed_counts[stage.stage_id] += 1
-                    if self.routing_mode == "deterministic" and stage.output_rules:
-                        sc = self._served_counts.setdefault(stage.stage_id, {})
-                        key = str(out_buffer_id)
-                        sc[key] = sc.get(key, 0) + 1
-                else:
-                    # Output buffer full or missing → delay and retry the completion
-                    self.blocking_counts[stage.stage_id] += 1
-                    self._push_event(self.t + 0.5, "complete", {"stage_id": stage.stage_id})
-                    return
-            else:
-                # No output buffer means this is a sink/final stage → finished product
-                self.finished += 1
-                # Simple lead-time approximation: we assume each order "started at t=0".
-                # If you track per-unit start times, record exact lead times here.
-                self.lead_times.append(self.t - 0.0)
-                self._accumulate_wip(self.t)
-                self.current_wip = max(0, self.current_wip - 1)
-                self.log.append(f"{self._fmt_t()} Product finished at '{stage.name}'. Finished={self.finished}")
+            if all_push_success:
                 self.stage_completed_counts[stage.stage_id] += 1
+                chosen_out = pushed_buffers[0] if pushed_buffers else None
 
         # Free the stage and immediately attempt next start at this stage
         stage.busy = False
@@ -642,11 +679,28 @@ class LegoLeanEnv:
             # Non-source: always try again
             self._push_event(self.t, "try_start", {"stage_id": stage.stage_id})
 
-        # Only wake consumers of the actual chosen output buffer (if they're not busy)
-        if chosen_out:
-            for s in self.stages.values():
-                if chosen_out in s.input_buffers and not s.busy:
+        # Wake consumers of pushed buffers
+        for s in self.stages.values():
+            for b in stage.output_buffers.keys():
+                if b in s.input_buffers and not s.busy:
                     self._push_event(self.t, "try_start", {"stage_id": s.stage_id})
+
+        # Assembly trace logging (consumed → produced)
+        if self.trace_assembly and proceed_to_output:
+            consumed_summary = {}
+            for _, item_id, qty in getattr(stage, "_pulled_items", []):
+                consumed_summary[item_id] = consumed_summary.get(item_id, 0) + qty
+            produced_summary = {}
+            for ob_id, item_id, qty in outputs_logged if 'outputs_logged' in locals() else []:
+                produced_summary.setdefault(ob_id, {})
+                produced_summary[ob_id][item_id] = produced_summary[ob_id].get(item_id, 0) + qty
+            self.assembly_traces.append({
+                "t": self.t,
+                "stage_id": stage.stage_id,
+                "stage_name": stage.name,
+                "consumed": consumed_summary,
+                "produced": produced_summary,
+            })
 
     # --------------------------------------------------------------------------
     # Internal time advance
@@ -661,6 +715,7 @@ class LegoLeanEnv:
             while self._next_sample_t <= new_t:
                 self._sample_snapshot(self._next_sample_t)
                 self._next_sample_t += self._sample_dt
+        self._accumulate_buffers(new_t)
         self._accumulate_wip(new_t)
         self.t = new_t
 
@@ -684,10 +739,19 @@ class LegoLeanEnv:
         }
         # Buffer levels snapshot
         for b_id, buf in self.buffers.items():
-            snap[str(b_id)] = int(buf.current)
+            snap[str(b_id)] = int(buf.total_items())
         self.timeline.append(snap)
         self._last_sample_finished = self.finished
         self._last_sample_time = at_t
+
+    def _accumulate_buffers(self, new_t: float):
+        """Accumulate buffer inventory*time area for holding cost and average levels."""
+        dt = max(0.0, new_t - self.last_buffer_time)
+        if dt <= 0:
+            return
+        for b_id, buf in self.buffers.items():
+            self.buffer_time_area[b_id] += buf.total_items() * dt
+        self.last_buffer_time = new_t
 
 
 # ==============================================================================
@@ -696,17 +760,29 @@ class LegoLeanEnv:
 
 CONFIG: Dict[str, Any] = {
     # ----------------------------------------------------------------------------
-    # Buffers (inventories). Use None capacity for "infinite" buffers.
-    # B, C1, C2, C3, D1, D2, and E follow your LEGO flow notation.
+    # Buffers (inventories). Itemized stocks.
     # ----------------------------------------------------------------------------
     "buffers": [
-        {"buffer_id": "B",  "name": "Warehouse B (post-TypeSorting)", "capacity": 999, "initial_stock": 30},
-        {"buffer_id": "C1", "name": "C1 (Axis Parts)",                "capacity": 999, "initial_stock": 0},
-        {"buffer_id": "C2", "name": "C2 (Chassis Parts)",             "capacity": 999, "initial_stock": 0},
-        {"buffer_id": "C3", "name": "C3 (Final Assembly Only Parts)", "capacity": 999, "initial_stock": 0},
-        {"buffer_id": "D1", "name": "D1 (Axis Subassembly)",          "capacity": 999, "initial_stock": 0},
-        {"buffer_id": "D2", "name": "D2 (Chassis Subassembly)",       "capacity": 999, "initial_stock": 0},
-        {"buffer_id": "E",  "name": "E (Finished Gliders)",           "capacity": 999, "initial_stock": 0},
+        {"buffer_id": "B",  "name": "Sorted Parts Buffer", "capacity": 9999, "initial_stock": {}},
+        {
+            "buffer_id": "A",
+            "name": "Warehouse A (Bricks)",
+            "capacity": 9999,
+            "initial_stock": {
+                "a01": 50, "a02": 50, "a03": 50, "a04": 50, "a05": 50, "a06": 50, "a07": 50,
+                "b01": 50, "b02": 50, "b03": 50, "b04": 50, "b05": 50, "b06": 50, "b07": 50,
+                "b08": 50, "b09": 50, "b10": 50, "b11": 50, "b12": 50, "b13": 50, "b14": 50,
+                "b15": 50, "b16": 50, "b17": 50, "b18": 50, "b19": 50,
+                "c01": 50, "c02": 50, "c03": 50, "c04": 50, "c05": 50, "c06": 50, "c07": 50, "c08": 50,
+                "x01": 50, "x02": 50, "x03": 50, "x04": 50
+            }
+        },
+        {"buffer_id": "C1", "name": "C1 (Set for Axis Assembly)", "capacity": 9999, "initial_stock": {"bun01": 0}},
+        {"buffer_id": "C2", "name": "C2 (Set for Chassis Assembly)", "capacity": 9999, "initial_stock": {"bun02": 0}},
+        {"buffer_id": "C3", "name": "C3 (Final Assembly Only Parts)", "capacity": 9999, "initial_stock": {"bun03": 0}},
+        {"buffer_id": "D1", "name": "D1 (Axis Subassembly)", "capacity": 9999, "initial_stock": {"saa01": 0, "saa02": 0}},
+        {"buffer_id": "D2", "name": "D2 (Chassis Subassembly)", "capacity": 9999, "initial_stock": {"sac01": 0, "sac02": 0}},
+        {"buffer_id": "E",  "name": "E (Finished Gliders)", "capacity": 9999, "initial_stock": {"fg01": 0, "fg02": 0, "fg03": 0, "fg04": 0}},
     ],
 
     # ----------------------------------------------------------------------------
@@ -721,82 +797,108 @@ CONFIG: Dict[str, Any] = {
     ],
 
     # ----------------------------------------------------------------------------
-    # Stages (process nodes).
-    # - S1 (Type Sorting): no input buffers → pushes to B
-    # - S2 (Set Sorting): pulls from B, probabilistic routing to C1/C2/C3
-    # - S3 (Axis Assembly): C1 → D1
-    # - S4 (Chassis Assembly): C2 → D2
-    # - S5 (Final Assembly): D1 + D2 + C3 → E (multi-input)
+    # Stages (BOM-based deterministic process)
     # ----------------------------------------------------------------------------
     "stages": [
         {
             "stage_id": "S1",
-            "name": "Type Sorting",
+            "name": "Type Sorting (Classification)",
             "team_id": "T1",
-            "input_buffers": [],               # source stage (no inputs)
-            "output_buffer": "B",              # deterministic output
-            "base_process_time_sec": 2.5,      # time per unit per worker
-            "time_distribution": {"type": "triangular", "p1": 2.0, "p2": 2.5, "p3": 4.0},
-            "transport_time_sec": 0.2,
-            "defect_rate": 0.00,
-            "workers": 2                       # number of workers at this stage
-        },
-        {
-            "stage_id": "S2",
-            "name": "Set Sorting",
-            "team_id": "T2",
-            "input_buffers": ["B"],
-            "output_rules": [                   # probabilistic split into C1/C2/C3
-                {"buffer_id": "C1", "p": 0.40},
-                {"buffer_id": "C2", "p": 0.40},
-                {"buffer_id": "C3", "p": 0.20}
-            ],
-            "base_process_time_sec": 3.0,      # time per unit per worker
+            "input_buffers": ["A"],
+            "required_materials": {
+                "a01": 1, "a03": 2, "a05": 2, "a06": 1, "a07": 2,
+                "b01": 1, "b02": 2, "b04": 1, "b05": 2, "b07": 1,
+                "b09": 1, "b10": 2, "b11": 1, "b13": 1, "b14": 2,
+                "b16": 1, "b18": 2,
+                "c01": 1, "c02": 1, "c03": 1, "c04": 1, "c05": 4, "c07": 1, "c08": 1,
+                "x01": 3, "x02": 4, "x03": 2
+            },
+            "output_buffers": {
+                # After sorting, classified parts go to B (same items)
+                "B": {
+                    "a01": 1, "a03": 2, "a05": 2, "a06": 1, "a07": 2,
+                    "b01": 1, "b02": 2, "b04": 1, "b05": 2, "b07": 1,
+                    "b09": 1, "b10": 2, "b11": 1, "b13": 1, "b14": 2,
+                    "b16": 1, "b18": 2,
+                    "c01": 1, "c02": 1, "c03": 1, "c04": 1, "c05": 4, "c07": 1, "c08": 1,
+                    "x01": 3, "x02": 4, "x03": 2
+                }
+            },
+            "base_process_time_sec": 3.0,
             "time_distribution": {"type": "triangular", "p1": 2.0, "p2": 3.0, "p3": 5.0},
             "transport_time_sec": 0.3,
             "defect_rate": 0.01,
-            "rework_stage_id": "S2",           # simple rework back to self
-            "workers": 2                       # number of workers
+            "rework_stage_id": "S1",
+            "workers": 2
+        },
+        {
+            "stage_id": "S2",
+            "name": "Set Sorting (Kit Build)",
+            "team_id": "T2",
+            "input_buffers": ["B"],
+            # Build three kits from classified parts in B
+            "required_materials": {
+                "a01": 1, "a03": 2, "a05": 2, "a06": 1, "a07": 2,
+                "b01": 1, "b02": 2, "b04": 1, "b05": 2, "b07": 1,
+                "b09": 1, "b10": 2, "b11": 1, "b13": 1, "b14": 2,
+                "b16": 1, "b18": 2,
+                "c01": 1, "c02": 1, "c03": 1, "c04": 1, "c05": 4, "c07": 1, "c08": 1,
+                "x01": 3, "x02": 4, "x03": 2
+            },
+            "output_buffers": {
+                "C1": {"bun01": 1},   # Axis set
+                "C2": {"bun02": 1},   # Chassis set
+                "C3": {"bun03": 1}    # Final set
+            },
+            "base_process_time_sec": 3.0,
+            "time_distribution": {"type": "triangular", "p1": 2.0, "p2": 3.0, "p3": 5.0},
+            "transport_time_sec": 0.3,
+            "defect_rate": 0.01,
+            "rework_stage_id": "S2",
+            "workers": 2
         },
         {
             "stage_id": "S3",
-            "name": "Axis Assembly",
+            "name": "Axis Subassembly",
             "team_id": "T3",
             "input_buffers": ["C1"],
-            "output_buffer": "D1",
-            "base_process_time_sec": 4.0,      # time per unit per worker
+            "required_materials": {"bun01": 1},
+            "output_buffers": {"D1": {"saa01": 1}},
+            "base_process_time_sec": 4.0,
             "time_distribution": {"type": "triangular", "p1": 3.0, "p2": 4.0, "p3": 6.0},
             "transport_time_sec": 0.4,
             "defect_rate": 0.02,
             "rework_stage_id": "S3",
-            "workers": 2                       # number of workers
+            "workers": 2
         },
         {
             "stage_id": "S4",
-            "name": "Chassis Assembly",
+            "name": "Chassis Subassembly",
             "team_id": "T4",
             "input_buffers": ["C2"],
-            "output_buffer": "D2",
-            "base_process_time_sec": 4.0,      # time per unit per worker
+            "required_materials": {"bun02": 1},
+            "output_buffers": {"D2": {"sac01": 1}},
+            "base_process_time_sec": 4.0,
             "time_distribution": {"type": "triangular", "p1": 3.0, "p2": 4.0, "p3": 6.0},
             "transport_time_sec": 0.4,
             "defect_rate": 0.02,
             "rework_stage_id": "S4",
-            "workers": 2                       # number of workers
+            "workers": 2
         },
         {
             "stage_id": "S5",
             "name": "Final Assembly",
             "team_id": "T5",
-            "input_buffers": ["D1", "D2", "C3"],   # multi-input
-            "output_buffer": "E",
-            "base_process_time_sec": 6.0,      # time per unit per worker
-            "time_distribution": {"type": "triangular", "p1": 5.0, "p2": 6.0, "p3": 9.0},
+            "input_buffers": ["C3", "D1", "D2"],
+            "required_materials": {"bun03": 1, "saa01": 1, "sac01": 1},
+            "output_buffers": {"E": {"fg01": 1}},
+            "base_process_time_sec": 5.0,
+            "time_distribution": {"type": "triangular", "p1": 4.0, "p2": 5.0, "p3": 7.0},
             "transport_time_sec": 0.5,
-            "defect_rate": 0.03,
+            "defect_rate": 0.02,
             "rework_stage_id": "S5",
-            "workers": 3                       # number of workers
-        },
+            "workers": 2
+        }
     ],
 
     # ----------------------------------------------------------------------------
@@ -812,7 +914,29 @@ CONFIG: Dict[str, Any] = {
     "parameters": {
         "target_takt_sec": 10.0,
         "timeline_sample_dt_sec": 5.0,
-        "finished_buffer_ids": ["E"]
+        "finished_buffer_ids": ["E"],
+        # Cost and revenue settings (all optional; units in currency/second where applicable)
+        "cost": {
+            "unit_price": 10000.0,           # revenue per finished glider
+            "unit_material_cost": 4400.0,    # material cost per released order (can be adjusted to per-BOM)
+            "labor_costs_per_team_sec": {    # cost rate per team per second (multiplied by team size)
+                "T1": 0.010,
+                "T2": 0.010,
+                "T3": 0.010,
+                "T4": 0.010,
+                "T5": 0.012
+            },
+            "holding_costs_per_buffer_sec": { # cost rate per unit inventory per second
+                "A": 0.0005, "B": 0.0005,
+                "C1": 0.001,
+                "C2": 0.001,
+                "C3": 0.001,
+                "D1": 0.001,
+                "D2": 0.001,
+                "E": 0.0005
+            },
+            "demand_qty": None               # optional cap on sellable units (None = unlimited)
+        }
     },
 
     # ----------------------------------------------------------------------------

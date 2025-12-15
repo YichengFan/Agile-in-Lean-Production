@@ -4,7 +4,7 @@
 import copy
 import json
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 import streamlit as st
 import pandas as pd
@@ -14,13 +14,6 @@ from env import LegoLeanEnv, CONFIG as DEFAULT_CONFIG
 # ---------------------------
 # Helpers
 # ---------------------------
-
-def normalize_probs(values: List[float]) -> List[float]:
-    total = sum(max(0.0, v) for v in values)
-    if total <= 0:
-        n = len(values)
-        return [1.0 / n] * n
-    return [max(0.0, v) / total for v in values]
 
 def stage_by_id(cfg: Dict[str, Any], sid: str) -> Dict[str, Any]:
     for s in cfg["stages"]:
@@ -47,7 +40,6 @@ with st.sidebar:
     seed = st.number_input("Random seed (None = random)", min_value=0, value=42, step=1)
     orders_to_release = st.number_input("Orders to release (push)", min_value=0, value=50, step=10)
     deterministic = st.checkbox("Deterministic processing (override times; disable disruptions)", value=False)
-    det_routing = st.checkbox("Deterministic routing (avoid starvation in S2)", value=False)
     show_logs_n = st.number_input("Show last N logs", min_value=0, value=30, step=5)
 
 cfg = copy.deepcopy(DEFAULT_CONFIG)
@@ -70,26 +62,6 @@ with d2:
     shift_end_min = st.number_input("Shift end (minutes in day)", min_value=0, max_value=24*60, value=int(cfg["shift_schedule"][0]["end_minute"]))
 cfg["shift_schedule"][0]["start_minute"] = int(shift_start_min)
 cfg["shift_schedule"][0]["end_minute"] = int(shift_end_min)
-
-st.markdown("---")
-st.subheader("Routing (S2 → C1/C2/C3)")
-st.caption("Adjust routing probabilities; auto-normalized to sum=1")
-s2 = stage_by_id(cfg, "S2")
-p_c1, p_c2, p_c3 = 0.40, 0.40, 0.20
-if s2.get("output_rules"):
-    try:
-        p_c1 = float([r for r in s2["output_rules"] if r["buffer_id"] == "C1"][0]["p"])
-        p_c2 = float([r for r in s2["output_rules"] if r["buffer_id"] == "C2"][0]["p"])
-        p_c3 = float([r for r in s2["output_rules"] if r["buffer_id"] == "C3"][0]["p"])
-    except Exception:
-        pass
-pc1 = st.number_input("P(C1)", min_value=0.0, max_value=1.0, value=p_c1, step=0.05)
-pc2 = st.number_input("P(C2)", min_value=0.0, max_value=1.0, value=p_c2, step=0.05)
-pc3 = st.number_input("P(C3)", min_value=0.0, max_value=1.0, value=p_c3, step=0.05)
-pc1, pc2, pc3 = normalize_probs([pc1, pc2, pc3])
-s2["output_rules"] = [{"buffer_id": "C1", "p": pc1}, {"buffer_id": "C2", "p": pc2}, {"buffer_id": "C3", "p": pc3}]
-st.caption(f"Normalized routing: C1={pc1:.2f}, C2={pc2:.2f}, C3={pc3:.2f}")
-cfg["parameters"]["routing_mode"] = "deterministic" if det_routing else "random"
 
 st.markdown("---")
 st.subheader("Processing & Quality")
@@ -147,11 +119,19 @@ with c2:
 st.markdown("---")
 st.subheader("Initial Buffer Stocks")
 bcols = st.columns(7)
-for i, bid in enumerate(["B", "C1", "C2", "C3", "D1", "D2", "E"]):
+for i, bid in enumerate(["A", "B", "C1", "C2", "C3", "D1", "D2", "E"]):
     with bcols[i]:
         b = buffer_by_id(cfg, bid)
-        init_val = st.number_input(f"{bid} initial_stock", min_value=0, value=int(b.get("initial_stock", 0)))
-        b["initial_stock"] = int(init_val)
+        default_str = json.dumps(b.get("initial_stock", {}), indent=0)
+        txt = st.text_area(f"{bid} initial_stock (json dict)", value=default_str, height=120)
+        try:
+            parsed = json.loads(txt)
+            if isinstance(parsed, dict):
+                b["initial_stock"] = {str(k): int(v) for k, v in parsed.items()}
+            else:
+                st.warning(f"{bid} initial_stock must be a JSON object/dict. Ignored.")
+        except Exception:
+            st.warning(f"{bid} initial_stock is invalid JSON. Ignored.")
 
 # ---------------------------
 # Run
@@ -164,6 +144,9 @@ if st.button("Run Simulation"):
         for s in cfg["stages"]:
             s["time_distribution"] = {"type": "constant"}
         cfg["random_events"]["missing_brick_prob"] = 0.0
+    # Assembly trace toggle
+    trace_assembly = st.sidebar.checkbox("Trace assembly (store per-job consumed/produced)", value=False)
+    cfg["parameters"]["trace_assembly"] = bool(trace_assembly)
     env = LegoLeanEnv(cfg, time_unit="sec", seed=int(seed))
     # Push-mode: release orders, then kick off
     if int(orders_to_release) > 0:
@@ -206,5 +189,8 @@ if st.button("Run Simulation"):
                        file_name="used_config.json", mime="application/json")
     st.download_button("Download logs (txt)", data="\n".join(env.log),
                        file_name="trace_log.txt", mime="text/plain")
+    if cfg["parameters"].get("trace_assembly"):
+        st.download_button("Download assembly traces (json)", data=json.dumps(env.assembly_traces, indent=2),
+                           file_name="assembly_traces.json", mime="application/json")
 else:
     st.info("Adjust parameters, then click **Run Simulation**.")
