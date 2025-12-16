@@ -175,6 +175,8 @@ class Stage:
     base_process_time_sec: float = 1.0
     time_distribution: Dict[str, Any] = field(default_factory=dict)
     transport_time_sec: float = 0.0
+    #dic to save the time from s2 to c1,c2,c3
+    transport_time_to_outputs_sec: dict = field(default_factory=dict)
     defect_rate: float = 0.0
     rework_stage_id: Optional[Any] = None
     workers: int = 1                                        # number of workers (affects processing speed)
@@ -252,6 +254,8 @@ class LegoLeanEnv:
                 base_process_time_sec=float(s.get("base_process_time_sec") or 1.0),
                 time_distribution=s.get("time_distribution") or {},
                 transport_time_sec=float(s.get("transport_time_sec") or 0.0),
+                #读取 config 时把这个字段读进 Stage
+                transport_time_to_outputs_sec=(s.get("transport_time_to_outputs_sec") or {}).copy(),
                 defect_rate=float(s.get("defect_rate") or 0.0),
                 rework_stage_id=s.get("rework_stage_id"),
                 workers=int(s.get("workers") or 1)
@@ -292,6 +296,10 @@ class LegoLeanEnv:
         self._evt_seq = 0
         self._queue: List[Event] = []
         self.t: float = 0.0
+        #每次S2完工产生一个job_id,并且记录还有几次deliver没送完
+        # Per-output transport tracking (used when a stage schedules multiple deliveries, e.g. S2 -> C1/C2/C3)
+        self._job_seq: int = 0
+        self._pending_deliveries: Dict[int, Dict[str, Any]] = {}
 
         # KPIs
         self.finished: int = 0
@@ -612,8 +620,19 @@ class LegoLeanEnv:
             ptime += penalty
             self.log.append(f"{self._fmt_t()} Disruption at '{stage.name}': missing bricks (+{penalty:.2f}s).")
 
-        finish_t = self.t + ptime + float(stage.transport_time_sec or 0.0)
-        self._push_event(finish_t, "complete", {"stage_id": stage.stage_id})
+        # Assign a job_id to this completion (needed if we split into multiple deliveries)
+        self._job_seq += 1
+        job_id = self._job_seq
+
+        # If per-output transport is configured, "complete" means processing done (no transport yet).
+        # Otherwise, keep old behavior (processing + transport in one finish_t).
+        if getattr(stage, "transport_time_to_outputs_sec", None):
+            finish_t = self.t + ptime
+        else:
+            finish_t = self.t + ptime + float(stage.transport_time_sec or 0.0)
+
+        self._push_event(finish_t, "complete", {"stage_id": stage.stage_id, "job_id": job_id})
+
         # Remember pulled items for BOM blocking retries
         if bom_mode:
             stage._pulled_items = pulled_items
@@ -626,6 +645,8 @@ class LegoLeanEnv:
 
         # Release team (utilization ends)
         team = self.teams.get(stage.team_id)
+        job_id = ev.payload.get("job_id")
+
         if team:
             team.stop_busy(self.t)
 
@@ -647,6 +668,25 @@ class LegoLeanEnv:
 
         chosen_out = None
         if proceed_to_output:
+            # --- NEW: per-output transport (e.g. S2 -> C1/C2/C3) ---
+            if getattr(stage, "transport_time_to_outputs_sec", None):
+                outputs = list(stage.output_buffers.items())
+                self._pending_deliveries[job_id] = {"stage_id": stage.stage_id, "remaining": len(outputs)}
+
+                for out_buffer_id, materials in outputs:
+                    delay = float(
+                        stage.transport_time_to_outputs_sec.get(out_buffer_id, stage.transport_time_sec) or 0.0)
+                    self._push_event(self.t + delay, "deliver", {
+                        "stage_id": stage.stage_id,
+                        "job_id": job_id,
+                        "out_buffer_id": out_buffer_id,
+                        "materials": materials,
+                    })
+
+                # IMPORTANT:
+                # Do NOT free the stage here. We will free it after all deliveries succeed.
+                return
+
             all_push_success = True
             pushed_buffers: List[str] = []
             outputs_logged: List[tuple] = []
@@ -711,6 +751,71 @@ class LegoLeanEnv:
                 "consumed": consumed_summary,
                 "produced": produced_summary,
             })
+#事件处理函数
+    def _on_deliver(self, ev: Event):
+        """Deliver transported outputs into the destination buffer after a delay."""
+        stage_id = ev.payload.get("stage_id")
+        job_id = ev.payload.get("job_id")
+        out_buffer_id = ev.payload.get("out_buffer_id")
+        materials = ev.payload.get("materials") or {}
+
+        stage = self.stages.get(stage_id)
+        ob = self.buffers.get(out_buffer_id)
+        if stage is None or ob is None:
+            self.log.append(f"{self._fmt_t()} deliver error: missing stage/buffer ({stage_id} -> {out_buffer_id}).")
+            return
+
+        # --- Atomic capacity check (avoid partial push then double-push on retry) ---
+        total_qty = sum(int(q) for q in materials.values())
+        if ob.capacity is not None:
+            if (ob.total_items() + total_qty) > int(ob.capacity):
+                self.blocking_counts[stage_id] += 1
+                self.log.append(f"{self._fmt_t()} deliver blocked: '{out_buffer_id}' full (retry).")
+                self._push_event(self.t + 0.5, "deliver", ev.payload)
+                return
+
+        # Push all items
+        for item_id, qty in materials.items():
+            ok = ob.push_item(item_id, int(qty))
+            if not ok:
+                # This should be rare due to atomic check, but keep safe retry
+                self.blocking_counts[stage_id] += 1
+                self.log.append(f"{self._fmt_t()} deliver blocked (unexpected): '{out_buffer_id}' full (retry).")
+                self._push_event(self.t + 0.5, "deliver", ev.payload)
+                return
+            self.log.append(f"{self._fmt_t()} delivered {qty}x '{item_id}' → '{out_buffer_id}'.")
+
+            # If delivered to finished buffer, update finished/WIP here
+            if str(out_buffer_id) in [str(x) for x in self.finished_buffers]:
+                self.finished += int(qty)
+                self.lead_times.append(self.t - 0.0)
+                self._accumulate_wip(self.t)
+                self.current_wip = max(0, self.current_wip - int(qty))
+                self.log.append(
+                    f"{self._fmt_t()} Product finished into buffer '{out_buffer_id}'. Finished={self.finished}")
+
+        # Wake consumers of THIS buffer
+        for s in self.stages.values():
+            if out_buffer_id in s.input_buffers and not s.busy:
+                self._push_event(self.t, "try_start", {"stage_id": s.stage_id})
+
+        # Countdown remaining deliveries for this job
+        rec = self._pending_deliveries.get(job_id)
+        if rec:
+            rec["remaining"] -= 1
+            if rec["remaining"] <= 0:
+                # All deliveries done -> now count completion and free the stage
+                self._pending_deliveries.pop(job_id, None)
+                self.stage_completed_counts[stage_id] += 1
+
+                stage.busy = False
+
+                # Re-trigger this stage (non-source always try again)
+                if not stage.input_buffers:
+                    if self.source_stage_orders.get(stage.stage_id, 0) > 0:
+                        self._push_event(self.t, "try_start", {"stage_id": stage.stage_id})
+                else:
+                    self._push_event(self.t, "try_start", {"stage_id": stage.stage_id})
 
     # --------------------------------------------------------------------------
     # Internal time advance
