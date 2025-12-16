@@ -102,6 +102,26 @@ def stage_controls(label: str, sid: str):
 with exp:
     stage_controls("Type Sorting", "S1")
     stage_controls("Set Sorting", "S2")
+    #插入三个输入框
+    # --- NEW: S2 per-output transport times ---
+    st.markdown("**S2 per-output transport (sec)**")
+    s2 = stage_by_id(cfg, "S2")
+    if "transport_time_to_outputs_sec" not in s2 or s2.get("transport_time_to_outputs_sec") is None:
+        base = float(s2.get("transport_time_sec", 0.0))
+        s2["transport_time_to_outputs_sec"] = {"C1": base, "C2": base, "C3": base}
+
+    ttc1, ttc2, ttc3 = st.columns(3)
+    with ttc1:
+        s2_c1 = st.number_input("S2 → C1", min_value=0.0, value=float(s2["transport_time_to_outputs_sec"].get("C1", 0.0)), step=0.1, key="S2_to_C1")
+    with ttc2:
+        s2_c2 = st.number_input("S2 → C2", min_value=0.0, value=float(s2["transport_time_to_outputs_sec"].get("C2", 0.0)), step=0.1, key="S2_to_C2")
+    with ttc3:
+        s2_c3 = st.number_input("S2 → C3", min_value=0.0, value=float(s2["transport_time_to_outputs_sec"].get("C3", 0.0)), step=0.1, key="S2_to_C3")
+
+    s2["transport_time_to_outputs_sec"]["C1"] = float(s2_c1)
+    s2["transport_time_to_outputs_sec"]["C2"] = float(s2_c2)
+    s2["transport_time_to_outputs_sec"]["C3"] = float(s2_c3)
+
     stage_controls("Axis Assembly", "S3")
     stage_controls("Chassis Assembly", "S4")
     stage_controls("Final Assembly", "S5")
