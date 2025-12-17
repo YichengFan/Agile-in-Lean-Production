@@ -28,6 +28,8 @@ import heapq
 import random
 import math
 import time
+from collections import deque  # Used to track order release times for lead-time calculation
+
 
 
 # ==============================================================================
@@ -175,6 +177,8 @@ class Stage:
     base_process_time_sec: float = 1.0
     time_distribution: Dict[str, Any] = field(default_factory=dict)
     transport_time_sec: float = 0.0
+    #dic to save the time from s2 to c1,c2,c3
+    transport_time_to_outputs_sec: dict = field(default_factory=dict)
     defect_rate: float = 0.0
     rework_stage_id: Optional[Any] = None
     workers: int = 1                                        # number of workers (affects processing speed)
@@ -252,6 +256,8 @@ class LegoLeanEnv:
                 base_process_time_sec=float(s.get("base_process_time_sec") or 1.0),
                 time_distribution=s.get("time_distribution") or {},
                 transport_time_sec=float(s.get("transport_time_sec") or 0.0),
+                #读取 config 时把这个字段读进 Stage
+                transport_time_to_outputs_sec=(s.get("transport_time_to_outputs_sec") or {}).copy(),
                 defect_rate=float(s.get("defect_rate") or 0.0),
                 rework_stage_id=s.get("rework_stage_id"),
                 workers=int(s.get("workers") or 1)
@@ -292,6 +298,10 @@ class LegoLeanEnv:
         self._evt_seq = 0
         self._queue: List[Event] = []
         self.t: float = 0.0
+        #每次S2完工产生一个job_id,并且记录还有几次deliver没送完
+        # Per-output transport tracking (used when a stage schedules multiple deliveries, e.g. S2 -> C1/C2/C3)
+        self._job_seq: int = 0
+        self._pending_deliveries: Dict[int, Dict[str, Any]] = {}
 
         # KPIs
         self.finished: int = 0
@@ -300,6 +310,36 @@ class LegoLeanEnv:
         self.wip_time_area: float = 0.0
         self.last_wip_time: float = 0.0
         self.current_wip: int = 0
+        # --------------------------------------------------------------------------
+        # Release control: CONWIP + Kanban (recommended for merge-assembly lines)
+        # --------------------------------------------------------------------------
+
+        # Which stages act as "release stages" (where orders are injected into the system).
+        # Even if a release stage has input buffers (e.g., S1 pulls from Warehouse A),
+        # we still gate its starts via order tokens to implement CONWIP release control.
+        self.release_stage_ids = set(self.parameters.get("release_stage_ids", []))
+        if not self.release_stage_ids:
+            # Backward-compatible default: stages with no input buffers are treated as release stages
+            self.release_stage_ids = {s_id for s_id, s in self.stages.items() if not s.input_buffers}
+
+        # Global WIP cap for CONWIP; if None, CONWIP is disabled
+        self.conwip_wip_cap = self.parameters.get("conwip_wip_cap", None)
+
+        # If True, each finished unit automatically releases one new order (closed-loop CONWIP)
+        self.auto_release_conwip = bool(self.parameters.get("auto_release_conwip", False))
+
+        # Kanban caps per buffer (local WIP control). These are "control limits",
+        # different from physical capacities (which may be very large like 9999).
+        self.kanban_caps = {str(k): int(v) for k, v in (self.parameters.get("kanban_caps", {}) or {}).items()}
+
+        # Count how often a stage is prevented from starting due to Kanban cap
+        self.kanban_blocking_counts = {s_id: 0 for s_id in self.stages}
+
+        # Order tokens per release stage (how many jobs this release stage is allowed to start)
+        self.stage_orders = {s_id: 0 for s_id in self.release_stage_ids}
+
+        # FIFO queue of release timestamps (one per released unit) to compute lead times at completion
+        self._release_times = deque()
 
         # Trace log
         self.log: List[str] = []
@@ -324,10 +364,6 @@ class LegoLeanEnv:
         self.starvation_counts: Dict[Any, int] = {s_id: 0 for s_id in self.stages}
         self.blocking_counts: Dict[Any, int] = {s_id: 0 for s_id in self.stages}
         self.stage_defect_counts: Dict[Any, int] = {s_id: 0 for s_id in self.stages}
-        # Order tracking for source stages (push mode)
-        self.source_stage_orders: Dict[Any, int] = {
-            s_id: 0 for s_id, s in self.stages.items() if not s.input_buffers
-        }
 
     # --------------------------------------------------------------------------
     # Shift logic
@@ -379,22 +415,37 @@ class LegoLeanEnv:
 
     def enqueue_orders(self, qty: int = 1):
         """
-        Increase WIP by 'qty' and trigger start attempts at all source stages
-        (stages with NO input buffers). This mimics releasing orders into the system.
-        In push mode, each source stage receives 'qty' orders to process.
+        Release 'qty' orders into the system (CONWIP-aware).
+        Adds order tokens to release stages (e.g., S1) and triggers try_start.
         """
-        # WIP area update before changing level
+        qty = int(qty)
+        if qty <= 0:
+            return
+
+        # Enforce CONWIP WIP cap (if enabled)
+        cap = self.parameters.get("conwip_wip_cap", None)
+        if cap is not None:
+            allowed = max(0, int(cap) - int(self.current_wip))
+            qty = min(qty, allowed)
+            if qty <= 0:
+                self.log.append(f"{self._fmt_t()} CONWIP cap reached; no new orders released.")
+                return
+
+        # Update WIP area before changing WIP level
         self._accumulate_wip(self.t)
         self.current_wip += qty
         self.started += qty
 
-        # For each 'source' stage (no input buffers), add orders and schedule ONE try_start
-        for s in self.stages.values():
-            if not s.input_buffers:
-                self.source_stage_orders[s.stage_id] = self.source_stage_orders.get(s.stage_id, 0) + qty
-                self._push_event(self.t, "try_start", {"stage_id": s.stage_id})
+        # Track release timestamps for lead-time KPI (FIFO)
+        for _ in range(qty):
+            self._release_times.append(self.t)
 
-        self.log.append(f"{self._fmt_t()} Enqueued {qty} order(s) into source stages.")
+        # Allocate order tokens to release stages and trigger try_start
+        for s_id in self.release_stage_ids:
+            self.stage_orders[s_id] = self.stage_orders.get(s_id, 0) + qty
+            self._push_event(self.t, "try_start", {"stage_id": s_id})
+
+        self.log.append(f"{self._fmt_t()} Released {qty} order(s) into {sorted(self.release_stage_ids)}.")
 
     def step(self) -> Optional[Event]:
         """
@@ -422,18 +473,6 @@ class LegoLeanEnv:
             self.log.append(f"{self._fmt_t()} [WARN] No handler for event kind='{ev.kind}'.")
         return ev
 
-        """Run the simulation until time reaches t_stop or event cap is hit."""
-        count = 0
-        while self._queue and count < max_events:
-            if self._queue[0].time > t_stop:
-                break
-            self.step()
-            count += 1
-        
-        # Only fast-forward if we naturally reached t_stop (not hit max_events)
-        if count < max_events or not self._queue:
-            self._on_time_advance(t_stop)
-
     def run_for(self, dt: float, max_events: int = 100000):
         """Run the simulation for dt seconds from current time."""
         self.run_until(self.t + dt, max_events=max_events)
@@ -449,6 +488,30 @@ class LegoLeanEnv:
         # Only fast-forward if we naturally reached t_stop or queue is empty
         if count < max_events or not self._queue:
             self._on_time_advance(t_stop)
+
+    def _on_unit_finished(self, qty: int = 1):
+         """
+         Called when finished units enter a finished buffer (e.g., E).
+         Updates finished count, lead times, and WIP. Optionally auto-releases CONWIP orders.
+                """
+         qty = int(qty)
+         if qty <= 0:
+           return
+
+         self.finished += qty
+
+         # Lead time = finish_time - release_time (FIFO matching)
+         for _ in range(qty):
+           rt = self._release_times.popleft() if self._release_times else 0.0
+           self.lead_times.append(max(0.0, self.t - rt))
+
+        # Unit leaves the system -> reduce WIP
+         self._accumulate_wip(self.t)
+         self.current_wip = max(0, self.current_wip - qty)
+
+     # Closed-loop CONWIP (optional)
+         if self.auto_release_conwip:
+                    self.enqueue_orders(qty)
 
     # --------------------------------------------------------------------------
     # KPI accumulation
@@ -466,7 +529,7 @@ class LegoLeanEnv:
         throughput = self.finished / sim_time
         lead_time_avg = sum(self.lead_times) / len(self.lead_times) if self.lead_times else 0.0
         wip_avg = self.wip_time_area / sim_time
-        service_level = self.finished / self.started
+        service_level =( self.finished / self.started)if self.started > 0 else 0.0
         utilization = {}
         """Defect KPI calculation"""
         defect_rate_per_stage = {}
@@ -559,15 +622,27 @@ class LegoLeanEnv:
             self._push_event(self.t + 0.001, "try_start", {"stage_id": stage.stage_id})
             return
 
-        # For source stages (no input buffers), check if there are orders to process
-        if not stage.input_buffers:
-            if self.source_stage_orders.get(stage.stage_id, 0) <= 0:
-                # No orders to process, don't start
+        # Release-stage gating: S1 needs an order token to start
+        if stage.stage_id in self.release_stage_ids:
+            if self.stage_orders.get(stage.stage_id, 0) <= 0:
                 return
-            # Consume one order
-            self.source_stage_orders[stage.stage_id] -= 1
+            self.stage_orders[stage.stage_id] -= 1
 
         bom_mode = bool(stage.required_materials) or bool(stage.output_buffers)
+        # Kanban gating: prevent starting if controlled output buffers would exceed caps
+        for out_b_id, materials in (stage.output_buffers or {}).items():
+            cap = self.kanban_caps.get(str(out_b_id))
+            if cap is None:
+                continue
+            ob = self.buffers.get(out_b_id)
+            if ob is None:
+                continue
+
+            projected = ob.total_items() + sum(int(q) for q in materials.values())
+            if projected > cap:
+                self.kanban_blocking_counts[stage.stage_id] += 1
+                self._push_event(self.t + 0.5, "try_start", {"stage_id": stage.stage_id})
+                return
 
         # Check inputs (BOM mode only)
         pulled_items: List[tuple] = []  # (buf, item_id, qty) for rollback if needed
@@ -612,8 +687,19 @@ class LegoLeanEnv:
             ptime += penalty
             self.log.append(f"{self._fmt_t()} Disruption at '{stage.name}': missing bricks (+{penalty:.2f}s).")
 
-        finish_t = self.t + ptime + float(stage.transport_time_sec or 0.0)
-        self._push_event(finish_t, "complete", {"stage_id": stage.stage_id})
+        # Assign a job_id to this completion (needed if we split into multiple deliveries)
+        self._job_seq += 1
+        job_id = self._job_seq
+
+        # If per-output transport is configured, "complete" means processing done (no transport yet).
+        # Otherwise, keep old behavior (processing + transport in one finish_t).
+        if getattr(stage, "transport_time_to_outputs_sec", None):
+            finish_t = self.t + ptime
+        else:
+            finish_t = self.t + ptime + float(stage.transport_time_sec or 0.0)
+
+        self._push_event(finish_t, "complete", {"stage_id": stage.stage_id, "job_id": job_id})
+
         # Remember pulled items for BOM blocking retries
         if bom_mode:
             stage._pulled_items = pulled_items
@@ -626,6 +712,8 @@ class LegoLeanEnv:
 
         # Release team (utilization ends)
         team = self.teams.get(stage.team_id)
+        job_id = ev.payload.get("job_id")
+
         if team:
             team.stop_busy(self.t)
 
@@ -644,9 +732,30 @@ class LegoLeanEnv:
                 self.current_wip = max(0, self.current_wip - 1)
                 proceed_to_output = False
                 self.log.append(f"{self._fmt_t()} '{stage.name}' defect → scrapped item.")
+                if self._release_times:
+                    self._release_times.popleft()
 
         chosen_out = None
         if proceed_to_output:
+            # --- NEW: per-output transport (e.g. S2 -> C1/C2/C3) ---
+            if getattr(stage, "transport_time_to_outputs_sec", None):
+                outputs = list(stage.output_buffers.items())
+                self._pending_deliveries[job_id] = {"stage_id": stage.stage_id, "remaining": len(outputs)}
+
+                for out_buffer_id, materials in outputs:
+                    delay = float(
+                        stage.transport_time_to_outputs_sec.get(out_buffer_id, stage.transport_time_sec) or 0.0)
+                    self._push_event(self.t + delay, "deliver", {
+                        "stage_id": stage.stage_id,
+                        "job_id": job_id,
+                        "out_buffer_id": out_buffer_id,
+                        "materials": materials,
+                    })
+
+                # IMPORTANT:
+                # Do NOT free the stage here. We will free it after all deliveries succeed.
+                return
+
             all_push_success = True
             pushed_buffers: List[str] = []
             outputs_logged: List[tuple] = []
@@ -667,28 +776,15 @@ class LegoLeanEnv:
                     outputs_logged.append((out_buffer_id, item_id, qty))
                     self.log.append(f"{self._fmt_t()} '{stage.name}' pushed {qty}x '{item_id}' → '{out_buffer_id}'.")
                     if str(out_buffer_id) in [str(x) for x in self.finished_buffers]:
-                        self.finished += qty
-                        self.lead_times.append(self.t - 0.0)
-                        self._accumulate_wip(self.t)
-                        self.current_wip = max(0, self.current_wip - qty)
-                        self.log.append(f"{self._fmt_t()} Product finished into buffer '{out_buffer_id}'. Finished={self.finished}")
+                        self._on_unit_finished(qty)
+                        self.log.append(
+                            f"{self._fmt_t()} Product finished into buffer '{out_buffer_id}'. Finished={self.finished}")
             if all_push_success:
                 self.stage_completed_counts[stage.stage_id] += 1
                 chosen_out = pushed_buffers[0] if pushed_buffers else None
 
         # Free the stage and immediately attempt next start at this stage
         stage.busy = False
-        
-        # For source stages (no inputs), only re-trigger if there are orders
-        # For non-source stages, always re-trigger (they pull from buffers)
-        if not stage.input_buffers:
-            # Source stage: check order count
-            if self.source_stage_orders.get(stage.stage_id, 0) > 0:
-                self._push_event(self.t, "try_start", {"stage_id": stage.stage_id})
-        else:
-            # Non-source: always try again
-            self._push_event(self.t, "try_start", {"stage_id": stage.stage_id})
-
         # Wake consumers of pushed buffers
         for s in self.stages.values():
             for b in stage.output_buffers.keys():
@@ -711,8 +807,76 @@ class LegoLeanEnv:
                 "consumed": consumed_summary,
                 "produced": produced_summary,
             })
+#事件处理函数
+    def _on_deliver(self, ev: Event):
+        """Deliver transported outputs into the destination buffer after a delay."""
+        stage_id = ev.payload.get("stage_id")
+        job_id = ev.payload.get("job_id")
+        out_buffer_id = ev.payload.get("out_buffer_id")
+        materials = ev.payload.get("materials") or {}
 
-    # --------------------------------------------------------------------------
+        stage = self.stages.get(stage_id)
+        ob = self.buffers.get(out_buffer_id)
+        if stage is None or ob is None:
+            self.log.append(f"{self._fmt_t()} deliver error: missing stage/buffer ({stage_id} -> {out_buffer_id}).")
+            return
+
+        # --- Atomic capacity check (avoid partial push then double-push on retry) ---
+        total_qty = sum(int(q) for q in materials.values())
+        if ob.capacity is not None:
+            if (ob.total_items() + total_qty) > int(ob.capacity):
+                self.blocking_counts[stage_id] += 1
+                self.log.append(f"{self._fmt_t()} deliver blocked: '{out_buffer_id}' full (retry).")
+                self._push_event(self.t + 0.5, "deliver", ev.payload)
+                return
+
+        # Push all items
+        for item_id, qty in materials.items():
+            ok = ob.push_item(item_id, int(qty))
+            if not ok:
+                # This should be rare due to atomic check, but keep safe retry
+                self.blocking_counts[stage_id] += 1
+                self.log.append(f"{self._fmt_t()} deliver blocked (unexpected): '{out_buffer_id}' full (retry).")
+                self._push_event(self.t + 0.5, "deliver", ev.payload)
+                return
+            self.log.append(f"{self._fmt_t()} delivered {qty}x '{item_id}' → '{out_buffer_id}'.")
+
+            if str(out_buffer_id) in [str(x) for x in self.finished_buffers]:
+                self._on_unit_finished(int(qty))
+                self.log.append(
+                    f"{self._fmt_t()} Product finished into buffer '{out_buffer_id}'. Finished={self.finished}")
+
+        # Wake consumers of THIS buffer
+        for s in self.stages.values():
+            if out_buffer_id in s.input_buffers and not s.busy:
+                self._push_event(self.t, "try_start", {"stage_id": s.stage_id})
+
+        # Countdown remaining deliveries for this job
+        rec = self._pending_deliveries.get(job_id)
+        if rec:
+            rec["remaining"] -= 1
+            if rec["remaining"] <= 0:
+                self._pending_deliveries.pop(job_id, None)
+                self.stage_completed_counts[stage_id] += 1
+                stage.busy = False
+
+                # Re-trigger ONLY after the stage is actually freed
+                if stage.stage_id in self.release_stage_ids:
+                    if self.stage_orders.get(stage.stage_id, 0) > 0:
+                        self._push_event(self.t, "try_start", {"stage_id": stage.stage_id})
+                else:
+                    self._push_event(self.t, "try_start", {"stage_id": stage.stage_id})
+
+        # Re-trigger start attempts:
+        # - S1 only tries again if it still has order tokens
+        # - Other stages keep pulling as usual
+        if stage.stage_id == "S1":
+            if self.stage_orders.get("S1", 0) > 0:
+                self._push_event(self.t, "try_start", {"stage_id": "S1"})
+        else:
+            self._push_event(self.t, "try_start", {"stage_id": stage.stage_id})
+
+        # --------------------------------------------------------------------------
     # Internal time advance
     # --------------------------------------------------------------------------
 
@@ -946,6 +1110,14 @@ CONFIG: Dict[str, Any] = {
                 "E": 0.0005
             },
             "demand_qty": None               # optional cap on sellable units (None = unlimited)
+        },
+        "release_stage_ids": ["S1"],  # 把 S1 作为入口放行的工序（即使它有 input_buffers 也可以）
+        "conwip_wip_cap": 12,  # 全局 WIP 上限（先用 8~15 试，建议从 12 起步）
+        "auto_release_conwip": True,  # 成品出系统后自动补放行
+        "kanban_caps": {  # 关键缓冲 Kanban 上限（建议先只控合流相关）
+            "C3": 4,
+            "D1": 4,
+            "D2": 4
         }
     },
 
@@ -959,8 +1131,6 @@ CONFIG: Dict[str, Any] = {
         "missing_brick_penalty_sec": 2.0
     }
 }
-
-
 # ==============================================================================
 # Minimal example (you can delete this block in production)
 # ==============================================================================
