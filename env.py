@@ -623,12 +623,11 @@ class LegoLeanEnv:
             return
 
         # Release-stage gating: S1 needs an order token to start
-        if stage.stage_id in self.release_stage_ids:
-            if self.stage_orders.get(stage.stage_id, 0) <= 0:
-                return
-            self.stage_orders[stage.stage_id] -= 1
-
-        bom_mode = bool(stage.required_materials) or bool(stage.output_buffers)
+       is_rework = bool(ev.payload.get("is_rework", False))
+       if stage.stage_id in self.release_stage_ids and (not is_rework):
+         if self.stage_orders.get(stage.stage_id, 0) <= 0:
+            return
+         self.stage_orders[stage.stage_id] -= 1
         # Kanban gating: prevent starting if controlled output buffers would exceed caps
         for out_b_id, materials in (stage.output_buffers or {}).items():
             cap = self.kanban_caps.get(str(out_b_id))
@@ -722,9 +721,11 @@ class LegoLeanEnv:
         if stage.defect_rate and random.random() < stage.defect_rate:
             """Defect counts logic"""
             self.stage_defect_counts[stage.stage_id] = self.stage_defect_counts.get(stage.stage_id, 0) + 1
-            if stage.rework_stage_id and stage.rework_stage_id in self.stages:
-                self._push_event(self.t, "try_start", {"stage_id": stage.rework_stage_id})
-                proceed_to_output = False
+           if stage.rework_stage_id and stage.rework_stage_id in self.stages:
+           # 标记这是返工触发的启动，不走 release token gating
+            self._push_event(self.t, "try_start", {"stage_id": stage.rework_stage_id, "is_rework": True})
+            proceed_to_output = False
+
                 self.log.append(f"{self._fmt_t()} '{stage.name}' defect → rework at '{stage.rework_stage_id}'.")
             else:
                 # Scrap: reduce WIP (this item leaves the system)
