@@ -45,7 +45,7 @@ This document focuses on the **simulation model** implementation details.
   - S<sub>3</sub>: Axis Assembly  
   - S<sub>4</sub>: Chassis Assembly  
   - S<sub>5</sub>: Final Assembly
-- **Buffers (inventories)**: B = {B, C<sub>1</sub>, C<sub>2</sub>, C<sub>3</sub>, D<sub>1</sub>, D<sub>2</sub>, E}
+- **Buffers (inventories)**: B = {A,B, C<sub>1</sub>, C<sub>2</sub>, C<sub>3</sub>, D<sub>1</sub>, D<sub>2</sub>, E}
 - **Teams (resources)**: T = {T<sub>1</sub>, T<sub>2</sub>, T<sub>3</sub>, T<sub>4</sub>, T<sub>5</sub>}
 - **Arcs**: directed edges between buffers and stages describing the flow:  
   S<sub>1</sub> → B → S<sub>2</sub> → {C<sub>1</sub>, C<sub>2</sub>, C<sub>3</sub>} → (S<sub>3</sub>, S<sub>4</sub>, S<sub>5</sub>) → E
@@ -56,7 +56,7 @@ This document focuses on the **simulation model** implementation details.
 
 - **Nominal processing time** at stage *i*: τ<sub>i</sub> &gt; 0 (seconds **per worker**)  
 - **Number of workers** at stage *i*: w<sub>i</sub> ∈ ℕ<sup>+</sup>  
-- **Effective processing time**: τ<sub>i</sub> / w<sub>i</sub>  
+- **Effective processing time**: (τ<sub>i</sub> * total_parts) / w<sub>i</sub>
 - **Transport time**: δ<sub>i</sub> ≥ 0
 - **S2 destination-specific delivery time (optional)**: δ_{2→b} ≥ 0  
   S2 can use a separate delivery delay (transport delay) for each destination buffer b ∈ {C1, C2, C3}.  
