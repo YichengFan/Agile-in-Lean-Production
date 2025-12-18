@@ -57,7 +57,11 @@ This document focuses on the **simulation model** implementation details.
 - **Nominal processing time** at stage *i*: τ<sub>i</sub> &gt; 0 (seconds **per worker**)  
 - **Number of workers** at stage *i*: w<sub>i</sub> ∈ ℕ<sup>+</sup>  
 - **Effective processing time**: τ<sub>i</sub> / w<sub>i</sub>  
-- **Transport time**: δ<sub>i</sub> ≥ 0  
+- **Transport time**: δ<sub>i</sub> ≥ 0
+- **S2 destination-specific delivery time (optional)**: δ_{2→b} ≥ 0  
+  S2 can use a separate delivery delay (transport delay) for each destination buffer b ∈ {C1, C2, C3}.  
+  When enabled, deliveries to C1/C2/C3 are scheduled after their own δ_{2→C1}, δ_{2→C2}, δ_{2→C3} (instead of a single shared δ_2).
+
 - **Time distribution descriptor**: D<sub>i</sub> = (type, p<sub>i1</sub>, p<sub>i2</sub>, p<sub>i3</sub>)  
 - **Defect probability**: q<sub>i</sub> ∈ [0, 1]  
 - **Rework routing**: defective items at *i* go to r(i) ∈ S or are scrapped  
