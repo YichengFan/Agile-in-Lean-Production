@@ -1,4 +1,4 @@
-# LEGO Lean Production — Simulation Model (Push, DES)
+# LEGO Lean Production — Simulation Model （Pull (CONWIP + Kanban) ）
 
 ## Quick Start
 
@@ -21,9 +21,9 @@ python env.py
 ```
 
 Notes
-- We currently use push strategy (no CONWIP). Use the sidebar to set orders to release.
-- Randomness is enabled by default; you can toggle Deterministic processing in the UI.
+- Updated: We now support Pull control (CONWIP + Kanban) via `env.py` config and the Streamlit panel.
 - `Environment.xlsx` is no longer used at runtime; parameters live in `env.py`'s `CONFIG`.
+- Randomness is enabled by default; you can toggle Deterministic processing in the UI.
 
 ---
 
@@ -67,7 +67,17 @@ This document focuses on the **simulation model** implementation details.
   - Occurrence π<sub>miss</sub>  
   - Extra time M with E[M] = m  
 - **System WIP cap (CONWIP)** K ∈ ℕ  
-- **Release rate** λ orders/sec (for push)
+- **Release rate** λ orders/sec  (**optional; push baseline only**)
+**Pull-control parameters (added)**(implementation under `CONFIG["parameters"]` in `env.py`)
+ - **Release-stage set**: R ⊆ S (token-gated entry stages)  
+  Code: `parameters.release_stage_ids` (e.g., `["S1"]`)
+- **CONWIP WIP cap**: K ∈ ℕ (max released-but-unfinished jobs)  
+  Code: `parameters.conwip_wip_cap`
+- **Closed-loop CONWIP switch**: β ∈ {0,1} (β=1 → release 1 job per finished unit)  
+  Code: `parameters.auto_release_conwip`
+- **Kanban buffer caps**: κ<sub>b</sub> ∈ ℕ for b ∈ B (local WIP control limits; not physical capacity)  
+  Code: `parameters.kanban_caps` (dict: b ↦ κ<sub>b</sub>)
+
 
 ---
 
@@ -88,6 +98,15 @@ Defect outcome: with prob q<sub>i</sub>, route to r(i) or scrap.
 - 1 worker: E[S<sub>i</sub>] = 3.0 / 1 + 0.3 = 3.3 sec
 - 2 workers: E[S<sub>i</sub>] = 3.0 / 2 + 0.3 = 1.8 sec
 - 3 workers: E[S<sub>i</sub>] = 3.0 / 3 + 0.3 = 1.3 sec
+**Per-output transport times (added)**  
+  For stages that deliver to multiple buffers (e.g., S2 → C1/C2/C3), we support a per-destination transport-time map:
+
+  - **Per-output transport time map**: δ<sub>i→b</sub> ≥ 0 for each destination buffer b  
+    Code: `transport_time_to_outputs_sec = {"C1": ..., "C2": ..., "C3": ...}`
+
+  - **Event logic**: one `deliver` event per destination buffer (rather than a single combined transport).  
+    Code path: `_on_complete()` schedules multiple `deliver` events; `_on_deliver()` performs the actual push into each output buffer.
+
 
 ---
 
@@ -106,25 +125,60 @@ X<sub>D1</sub> ≥ 1 and X<sub>D2</sub> ≥ 1 and X<sub>C3</sub> ≥ 1.
 
 ## 5) Event Logic
 
-**Release event**  
-- If CONWIP: allow if L(t) &lt; K  
-- Else: release per λ or manual  
-- Each release triggers “try_start” at a source stage; L(t) += 1
-
-**Try-start at stage i (BOM deterministic)**  
-- If Y<sub>i</sub> = 0 and required_materials are all available (from any listed input buffer):  
-  pull each required item/qty; set Y<sub>i</sub> = 1; sample S<sub>i</sub>; schedule completion t+S<sub>i</sub>  
-- Else: retry after ε
-
-**Completion at stage i (BOM deterministic)**  
-- Stop U<sub>i</sub>  
-- With prob q<sub>i</sub>: defect → rework or scrap (L–1)  
-- Else: push deterministic outputs (output_buffers). If blocked retry; if sink/finished buffer → finished C+1, L–1  
-- Set Y<sub>i</sub> = 0; trigger downstream “try_start”  
-
-Shift constraint: postpone if α(t)=0.
+**Release event (Pull: CONWIP + Kanban)**  
+- Release is **token-based** to the entry stage(s) R.  
+- If CONWIP is enabled: allow release only if L(t) < K.  
+- On release: issue tokens to stages in R, append release timestamp(s), and set L(t) += 1.  
+- If closed-loop CONWIP is enabled (β = 1): each finished unit triggers releasing one new order (subject to K).
 
 ---
+
+### Try-start at stage i (pull-gated, BOM deterministic)
+
+A stage i can start only if all of the following hold:
+
+- **Idle condition:** Y<sub>i</sub>(t) = 0 (`stage.busy == False`)
+- **Release-stage token gating (CONWIP):** if i ∈ R (`release_stage_ids`), then  
+  `stage_orders[i] > 0` must hold, and starting consumes one token.
+- **Kanban gating:** for any controlled output buffer b with cap K<sub>b</sub> (`kanban_caps[b]`), the projected post-push level must satisfy:  
+  X<sub>b</sub>(t) + ΔX<sub>b</sub> ≤ K<sub>b</sub>  
+  Otherwise, the stage does not start and retries later.
+- **Material availability (BOM):** for each required item k with quantity a<sub>ik</sub>, required inputs must exist in the listed input buffers; otherwise the stage starves and retries.
+
+If all checks pass:
+- Pull BOM items from buffers
+- Set Y<sub>i</sub>(t) = 1
+- Sample processing time and schedule `complete` at t + S<sub>i</sub>
+
+---
+
+### Completion at stage i (updated)
+
+On `complete(i)`:
+- Stop team utilization timer U<sub>i</sub>
+- **Defect handling:** with probability q<sub>i</sub>:
+  - route to rework r(i), or
+  - scrap (and reduce WIP by 1 if it leaves the system)
+- **Otherwise push deterministic outputs** (`output_buffers`)
+  - If downstream is blocked, retry later (no partial commit)
+  - If output goes to finished buffer E:
+    - finished count increases
+    - WIP decreases (job leaves the system)
+    - If `auto_release_conwip=True`, release one new order (closed-loop)
+
+---
+
+### Deliver event (added: per-output transport)
+
+When a stage i has per-destination transport times δ<sub>i→b</sub>:
+
+- `complete(i)` schedules one `deliver(i→b)` per output buffer b
+- Each deliver occurs after its own delay δ<sub>i→b</sub>
+- The stage is freed only after **all** deliveries succeed (multi-delivery completion)
+
+---
+
+Shift constraint: postpone any event if α(t)=0.
 
 ## 6) KPIs
 
@@ -193,6 +247,14 @@ These indicate structural flow imbalance:
 These KPIs help diagnose bottleneck interactions, buffer sizing issues, and routing problems.
 
 ---
+### • **Kanban blocking counts (added)**
+
+Meaning:  
+Counts how often a stage wants to start but is stopped because starting would push a controlled buffer above its Kanban cap.
+
+- **Kanban blocking**: a stage wants to start but local WIP limit (`kanban_caps`) would be exceeded
+
+---
 
 ### • **Defect rate**
 Formula: DR<sub>i</sub> = N<sub>i,def</sub> / (N<sub>i,def</sub> + N<sub>i,ok</sub>); DR<sub>total</sub> = Σ N<sub>i,def</sub> / Σ (N<sub>i,def</sub> + N<sub>i,ok</sub>)
@@ -242,7 +304,15 @@ CONWIP: K controls θ(K) and W̄(K)=L̄(K)/θ(K). Tune K to balance throughput/l
 | Multi-input | `input_buffers=["D1","D2","C3"]` |
 | α(t) | `shift_schedule` |
 | π<sub>miss</sub>, m | `random_events` |
-| K | `parameters.conwip_cap` |
+| CONWIP cap K | `parameters.conwip_wip_cap` |
+| Release stages R | `parameters.release_stage_ids` |
+| Closed-loop CONWIP β | `parameters.auto_release_conwip` |
+| Kanban caps κ<sub>b</sub> | `parameters.kanban_caps` |
+| WIP L(t) | `self.current_wip` |
+| Lead time timestamps | `self._release_times` |
+| Kanban blocking | `self.kanban_blocking_counts` |
+| Release tokens | `self.stage_orders` |
+| δ<sub>i→b</sub> (per-output transport) | `stages[].transport_time_to_outputs_sec` + `deliver` event (`_on_deliver`) |
 | N<sub>fin</sub>(t), N<sub>target</sub> | `self.finished`, `self.started` |
 | N<sub>i,def</sub>, N<sub>i,ok</sub> | `stage_defect_counts`, `stage_completed_counts` |
 
@@ -250,10 +320,10 @@ CONWIP: K controls θ(K) and W̄(K)=L̄(K)/θ(K). Tune K to balance throughput/l
 
 ## 10) Simulation Assumptions
 
-- **Discrete-event simulation**: Events processed in chronological order using priority queue
-- **Push strategy**: Orders released at t=0 (or per release rate λ)
-- **No CONWIP**: Currently no global WIP cap (can be added)
-- **Event-driven**: `try_start` and `complete` events drive state transitions
+- **Discrete-event simulation**: Events processed in chronological order using a priority queue
+- **Pull strategy (CONWIP + Kanban)**: Order release is token-gated at release stage(s) and constrained by a global CONWIP WIP cap
+- **Closed-loop CONWIP (optional)**: If enabled, each finished unit releases one new order (subject to the WIP cap)
+- **Event-driven**: `try_start`, `complete`, and (optional) `deliver` events drive state transitions
 - **Time sampling**: KPIs sampled at intervals (`timeline_sample_dt_sec`) for visualization
 - **Random number generation**: Uses Python `random` module with optional seed
 - **Deterministic BOM flow**: No probabilistic routing; outputs are itemized and deterministic
