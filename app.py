@@ -34,13 +34,34 @@ def buffer_by_id(cfg: Dict[str, Any], bid: str) -> Dict[str, Any]:
 # ---------------------------
 
 st.set_page_config(page_title="LEGO Lean Simulator", layout="wide")
-st.title("LEGO Lean Production Simulator (Pull: CONWIP + Kanban)")
+st.title("LEGO Lean Production Simulator (Push/Pull: CONWIP + Kanban)")
 
 cfg = copy.deepcopy(DEFAULT_CONFIG)
 
 with st.sidebar:
     st.header("Run Controls")
+    enable_pull = st.checkbox("Enable Pull (CONWIP + Kanban)", value=True)
+    if enable_pull:
+        st.markdown("### Pull Control (CONWIP + Kanban)")
+        conwip_cap = st.number_input("CONWIP WIP cap", min_value=0,
+                                     value=int(cfg["parameters"].get("conwip_wip_cap", 12)), step=1)
+        auto_release = st.checkbox("Closed-loop CONWIP (auto release on finish)",
+                                   value=bool(cfg["parameters"].get("auto_release_conwip", True)))
 
+        # release stages
+        release_stage_ids = st.multiselect(
+            "Release stage(s) (token-gated)",
+            options=[s["stage_id"] for s in cfg["stages"]],
+            default=cfg["parameters"].get("release_stage_ids", ["S1"])
+        )
+
+        st.markdown("**Kanban caps (control limits)**")
+        kc1 = st.number_input("Kanban cap: C3", min_value=0,
+                              value=int(cfg["parameters"].get("kanban_caps", {}).get("C3", 4)), step=1)
+        kd1 = st.number_input("Kanban cap: D1", min_value=0,
+                              value=int(cfg["parameters"].get("kanban_caps", {}).get("D1", 4)), step=1)
+        kd2 = st.number_input("Kanban cap: D2", min_value=0,
+                              value=int(cfg["parameters"].get("kanban_caps", {}).get("D2", 4)), step=1)
     sim_time = st.number_input("Simulation time (seconds)", min_value=1, value=3600, step=60)
 
     use_random_seed = st.checkbox("Use random seed", value=False)
@@ -329,6 +350,18 @@ if st.button("Run Simulation"):
     # Assembly trace toggle
     trace_assembly = st.sidebar.checkbox("Trace assembly (store per-job consumed/produced)", value=False)
     cfg["parameters"]["trace_assembly"] = bool(trace_assembly)
+    # Apply mode settings
+    if enable_pull:
+        cfg["parameters"]["release_stage_ids"] = release_stage_ids
+        cfg["parameters"]["conwip_wip_cap"] = int(conwip_cap) if int(conwip_cap) > 0 else None
+        cfg["parameters"]["auto_release_conwip"] = bool(auto_release)
+        cfg["parameters"]["kanban_caps"] = {"C3": int(kc1), "D1": int(kd1), "D2": int(kd2)}
+    else:
+        # Disable pull control explicitly (back to push)
+        cfg["parameters"]["release_stage_ids"] = []  # or ["S1"] but with no gating
+        cfg["parameters"]["conwip_wip_cap"] = None
+        cfg["parameters"]["auto_release_conwip"] = False
+        cfg["parameters"]["kanban_caps"] = {}
 
     # Build env
     env = LegoLeanEnv(cfg, time_unit="sec", seed=(None if seed is None else int(seed)))
