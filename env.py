@@ -490,32 +490,37 @@ class LegoLeanEnv:
             self._on_time_advance(t_stop)
 
     def _on_unit_finished(self, qty: int = 1):
-         """
-         Called when finished units enter a finished buffer (e.g., E).
-         Updates finished count, lead times, and WIP. Optionally auto-releases CONWIP orders.
-                """
-         qty = int(qty)
-         if qty <= 0:
-           return
+        """Called when finished units enter a finished buffer (e.g., E).
 
-         self.finished += qty
+        Updates:
+          - finished count
+          - lead times (FIFO match to release times)
+          - WIP (decrement on completion)
+          - optionally auto-releases CONWIP orders
+        """
+        qty = int(qty)
+        if qty <= 0:
+            return
 
-         # Lead time = finish_time - release_time (FIFO matching)
-         for _ in range(qty):
-           rt = self._release_times.popleft() if self._release_times else 0.0
-           self.lead_times.append(max(0.0, self.t - rt))
+        self.finished += qty
+
+        # Lead time = finish_time - release_time (FIFO matching)
+        for _ in range(qty):
+            rt = self._release_times.popleft() if self._release_times else 0.0
+            self.lead_times.append(max(0.0, self.t - rt))
 
         # Unit leaves the system -> reduce WIP
-         self._accumulate_wip(self.t)
-         self.current_wip = max(0, self.current_wip - qty)
+        self._accumulate_wip(self.t)
+        self.current_wip = max(0, self.current_wip - qty)
 
-     # Closed-loop CONWIP (optional)
-         if self.auto_release_conwip:
-                    self.enqueue_orders(qty)
+        # Closed-loop CONWIP (optional)
+        if self.auto_release_conwip:
+            self.enqueue_orders(qty)
 
     # --------------------------------------------------------------------------
     # KPI accumulation
     # --------------------------------------------------------------------------
+
 
     def _accumulate_wip(self, new_t: float):
         """Accumulate WIP*time area to compute average WIP later."""
@@ -617,17 +622,18 @@ class LegoLeanEnv:
         if stage is None:
             return
 
+        is_rework = bool(ev.payload.get("is_rework", False))
+
         # If stage is busy, try again shortly
         if stage.busy:
-            self._push_event(self.t + 0.001, "try_start", {"stage_id": stage.stage_id})
+            self._push_event(self.t + 0.001, "try_start", {"stage_id": stage.stage_id, "is_rework": is_rework})
             return
 
-        # Release-stage gating: S1 needs an order token to start
-       is_rework = bool(ev.payload.get("is_rework", False))
-       if stage.stage_id in self.release_stage_ids and (not is_rework):
-         if self.stage_orders.get(stage.stage_id, 0) <= 0:
-            return
-         self.stage_orders[stage.stage_id] -= 1
+        # Release-stage gating: release stages need an order token to start (except rework)
+        if stage.stage_id in self.release_stage_ids and (not is_rework):
+            if self.stage_orders.get(stage.stage_id, 0) <= 0:
+                return
+            self.stage_orders[stage.stage_id] -= 1
         # Kanban gating: prevent starting if controlled output buffers would exceed caps
         for out_b_id, materials in (stage.output_buffers or {}).items():
             cap = self.kanban_caps.get(str(out_b_id))
@@ -640,11 +646,13 @@ class LegoLeanEnv:
             projected = ob.total_items() + sum(int(q) for q in materials.values())
             if projected > cap:
                 self.kanban_blocking_counts[stage.stage_id] += 1
-                self._push_event(self.t + 0.5, "try_start", {"stage_id": stage.stage_id})
+                self._push_event(self.t + 0.5, "try_start", {"stage_id": stage.stage_id, "is_rework": is_rework})
                 return
 
         # Check inputs (BOM mode only)
         pulled_items: List[tuple] = []  # (buf, item_id, qty) for rollback if needed
+
+        bom_mode = bool(stage.required_materials)
 
         if stage.required_materials:
             for item_id, required_qty in stage.required_materials.items():
@@ -664,7 +672,7 @@ class LegoLeanEnv:
                         pb.push_item(it, qty)
                     self.starvation_counts[stage.stage_id] += 1
                     self.log.append(f"{self._fmt_t()} '{stage.name}' waiting: insufficient '{item_id}' (need {required_qty}).")
-                    self._push_event(self.t + 0.5, "try_start", {"stage_id": stage.stage_id})
+                    self._push_event(self.t + 0.5, "try_start", {"stage_id": stage.stage_id, "is_rework": is_rework})
                     return
 
         # Engage team (utilization starts)
@@ -719,19 +727,20 @@ class LegoLeanEnv:
         # Defect handling (rework or scrap)
         proceed_to_output = True
         if stage.defect_rate and random.random() < stage.defect_rate:
-            """Defect counts logic"""
+            # Count defects per stage
             self.stage_defect_counts[stage.stage_id] = self.stage_defect_counts.get(stage.stage_id, 0) + 1
-           if stage.rework_stage_id and stage.rework_stage_id in self.stages:
-           # 标记这是返工触发的启动，不走 release token gating
-            self._push_event(self.t, "try_start", {"stage_id": stage.rework_stage_id, "is_rework": True})
             proceed_to_output = False
 
-                self.log.append(f"{self._fmt_t()} '{stage.name}' defect → rework at '{stage.rework_stage_id}'.")
+            if stage.rework_stage_id and stage.rework_stage_id in self.stages:
+                # Mark as rework so it bypasses release-stage token gating
+                self._push_event(self.t, "try_start", {"stage_id": stage.rework_stage_id, "is_rework": True})
+                self.log.append(
+                    f"{self._fmt_t()} '{stage.name}' defect → rework at '{stage.rework_stage_id}'."
+                )
             else:
-                # Scrap: reduce WIP (this item leaves the system)
+                # Scrap: item leaves the system -> reduce WIP and (FIFO) drop its release time
                 self._accumulate_wip(self.t)
                 self.current_wip = max(0, self.current_wip - 1)
-                proceed_to_output = False
                 self.log.append(f"{self._fmt_t()} '{stage.name}' defect → scrapped item.")
                 if self._release_times:
                     self._release_times.popleft()
