@@ -370,6 +370,7 @@ if st.button("Run Simulation"):
     if int(initial_release) > 0:
         env.enqueue_orders(qty=int(initial_release))
 
+    #2026-01-01 存疑，如果是push的话enqueue激活就够了，这样是否会反复激活S1？
     # Kick off: try starting all stages once
     for s in env.stages.values():
         env._push_event(env.t, "try_start", {"stage_id": s.stage_id})
