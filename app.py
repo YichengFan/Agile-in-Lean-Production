@@ -66,7 +66,8 @@ with st.sidebar:
 
     use_random_seed = st.checkbox("Use random seed", value=False)
     seed = None
-    if not use_random_seed:
+    #2026-1-3 原本是if not use ,改成if use
+    if use_random_seed:
         seed = st.number_input("Random seed", min_value=0, value=42, step=1)
 
     # Pull-mode release: initial injection only (then closed-loop CONWIP can replenish)
