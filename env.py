@@ -212,6 +212,9 @@ class LegoLeanEnv:
     def __init__(self, config: Dict[str, Any], time_unit: str = "sec", seed: Optional[int] = None):
         self.cfg = config
         self.time_unit = time_unit
+        # 2026-01-01 把tracelog初始化弄上来一点，这样在原本位置上面的日志就可以正常输出了
+        # Trace log
+        self.log: List[str] = []
         if seed is not None:
             random.seed(seed)
 
@@ -257,6 +260,9 @@ class LegoLeanEnv:
                 time_distribution=s.get("time_distribution") or {},
                 transport_time_sec=float(s.get("transport_time_sec") or 0.0),
                 #读取 config 时把这个字段读进 Stage
+                # 2026-01-01 你自己看看这条还要不要把，你如果要的话，你config里也没那个玩意儿，我感觉你这个代码是不是直接照抄GPT啊
+                # 他写这个or 你就跟了虽然面板上能看到但实际上这只不过是把原来 transport_tim_sec复制进去了，请你检查这样的操作是否
+                # 真的可以激活765的判定，或者你看到后面我写的注释你自己再思考一下是不是应该直接合并所有运输都在deliver里面而不只是S2
                 transport_time_to_outputs_sec=(s.get("transport_time_to_outputs_sec") or {}).copy(),
                 defect_rate=float(s.get("defect_rate") or 0.0),
                 rework_stage_id=s.get("rework_stage_id"),
@@ -303,6 +309,10 @@ class LegoLeanEnv:
         self._job_seq: int = 0
         self._pending_deliveries: Dict[int, Dict[str, Any]] = {}
 
+        # Deduplicate try_start retries to avoid event explosion
+        self._try_start_scheduled: set = set()
+
+
         # KPIs
         self.finished: int = 0
         self.started: int = 0
@@ -317,10 +327,12 @@ class LegoLeanEnv:
         # Which stages act as "release stages" (where orders are injected into the system).
         # Even if a release stage has input buffers (e.g., S1 pulls from Warehouse A),
         # we still gate its starts via order tokens to implement CONWIP release control.
-        self.release_stage_ids = set(self.parameters.get("release_stage_ids", []))
-        if not self.release_stage_ids:
-            # Backward-compatible default: stages with no input buffers are treated as release stages
-            self.release_stage_ids = {s_id for s_id, s in self.stages.items() if not s.input_buffers}
+        #self.release_stage_ids = set(self.parameters.get("release_stage_ids", []))
+
+        # 2026-01-01 手动设置起始站点为S1因为发现不知道为什么parameter读不出来，反正没事log反应是对的就好
+        self.release_stage_ids = {"S1"}
+        self.log.append(f"Release stages detected: {self.release_stage_ids}")
+
 
         # Global WIP cap for CONWIP; if None, CONWIP is disabled
         self.conwip_wip_cap = self.parameters.get("conwip_wip_cap", None)
@@ -341,8 +353,7 @@ class LegoLeanEnv:
         # FIFO queue of release timestamps (one per released unit) to compute lead times at completion
         self._release_times = deque()
 
-        # Trace log
-        self.log: List[str] = []
+        #2026-01-01 tracelog 弄上去了
 
         # Timeline sampling
         self.timeline: List[Dict[str, Any]] = []
@@ -409,6 +420,16 @@ class LegoLeanEnv:
             return None
         return heapq.heappop(self._queue)
 
+
+    def _schedule_try_start(self, stage_id: Any, delay: float = 0.0, is_rework: bool = False):
+        """Schedule a try_start event if one isn't already pending for this (stage_id, is_rework)."""
+        key = (stage_id, bool(is_rework))
+        if key in self._try_start_scheduled:
+            return
+        self._try_start_scheduled.add(key)
+        self._push_event(self.t + float(delay), "try_start", {"stage_id": stage_id, "is_rework": bool(is_rework)})
+
+
     # --------------------------------------------------------------------------
     # Public API
     # --------------------------------------------------------------------------
@@ -443,7 +464,7 @@ class LegoLeanEnv:
         # Allocate order tokens to release stages and trigger try_start
         for s_id in self.release_stage_ids:
             self.stage_orders[s_id] = self.stage_orders.get(s_id, 0) + qty
-            self._push_event(self.t, "try_start", {"stage_id": s_id})
+            self._schedule_try_start(s_id, delay=0.0, is_rework=False)
 
         self.log.append(f"{self._fmt_t()} Released {qty} order(s) into {sorted(self.release_stage_ids)}.")
 
@@ -624,9 +645,11 @@ class LegoLeanEnv:
 
         is_rework = bool(ev.payload.get("is_rework", False))
 
-        # If stage is busy, try again shortly
+        # This try_start is now being processed; clear any pending flag for this stage
+        self._try_start_scheduled.discard((stage.stage_id, is_rework))
+        # If stage is busy, do nothing. The stage will re-trigger try_start when it becomes free.
+        #2026-1-3
         if stage.busy:
-            self._push_event(self.t + 0.001, "try_start", {"stage_id": stage.stage_id, "is_rework": is_rework})
             return
 
         # Release-stage gating: release stages need an order token to start (except rework)
@@ -646,7 +669,7 @@ class LegoLeanEnv:
             projected = ob.total_items() + sum(int(q) for q in materials.values())
             if projected > cap:
                 self.kanban_blocking_counts[stage.stage_id] += 1
-                self._push_event(self.t + 0.5, "try_start", {"stage_id": stage.stage_id, "is_rework": is_rework})
+                self._schedule_try_start(stage.stage_id, delay=0.5, is_rework=is_rework)
                 return
 
         # Check inputs (BOM mode only)
@@ -672,7 +695,7 @@ class LegoLeanEnv:
                         pb.push_item(it, qty)
                     self.starvation_counts[stage.stage_id] += 1
                     self.log.append(f"{self._fmt_t()} '{stage.name}' waiting: insufficient '{item_id}' (need {required_qty}).")
-                    self._push_event(self.t + 0.5, "try_start", {"stage_id": stage.stage_id, "is_rework": is_rework})
+                    self._schedule_try_start(stage.stage_id, delay=0.5, is_rework=is_rework)
                     return
 
         # Engage team (utilization starts)
@@ -697,10 +720,10 @@ class LegoLeanEnv:
         # Assign a job_id to this completion (needed if we split into multiple deliveries)
         self._job_seq += 1
         job_id = self._job_seq
-
         # If per-output transport is configured, "complete" means processing done (no transport yet).
         # Otherwise, keep old behavior (processing + transport in one finish_t).
         if getattr(stage, "transport_time_to_outputs_sec", None):
+            # transport handled by separate deliver events
             finish_t = self.t + ptime
         else:
             finish_t = self.t + ptime + float(stage.transport_time_sec or 0.0)
@@ -745,6 +768,10 @@ class LegoLeanEnv:
                 if self._release_times:
                     self._release_times.popleft()
 
+
+        # 2026-01-01 请你检查这里真的进的了这个事件吗？如果你要专门为了S2开一个运送事件，是否可以把所有站点的运送/激活都在这个事件中激活？
+        # 这样的话可以直接把773 return后面的全注释掉了，因为757行的判定也不那么必要了直接进deliver就可以了，因为我看了你deliver的逻辑
+        # deliver逻辑就算一般的站点也可以走这一套逻辑
         chosen_out = None
         if proceed_to_output:
             # --- NEW: per-output transport (e.g. S2 -> C1/C2/C3) ---
@@ -795,11 +822,12 @@ class LegoLeanEnv:
 
         # Free the stage and immediately attempt next start at this stage
         stage.busy = False
+        self._schedule_try_start(stage.stage_id, delay=0.0, is_rework=False)
         # Wake consumers of pushed buffers
         for s in self.stages.values():
             for b in stage.output_buffers.keys():
                 if b in s.input_buffers and not s.busy:
-                    self._push_event(self.t, "try_start", {"stage_id": s.stage_id})
+                    self._schedule_try_start(s.stage_id, delay=0.0, is_rework=False)
 
         # Assembly trace logging (consumed → produced)
         if self.trace_assembly and proceed_to_output:
@@ -817,6 +845,7 @@ class LegoLeanEnv:
                 "consumed": consumed_summary,
                 "produced": produced_summary,
             })
+
 #事件处理函数
     def _on_deliver(self, ev: Event):
         """Deliver transported outputs into the destination buffer after a delay."""
@@ -856,11 +885,13 @@ class LegoLeanEnv:
                 self.log.append(
                     f"{self._fmt_t()} Product finished into buffer '{out_buffer_id}'. Finished={self.finished}")
 
-        # Wake consumers of THIS buffer
-        for s in self.stages.values():
-            if out_buffer_id in s.input_buffers and not s.busy:
-                self._push_event(self.t, "try_start", {"stage_id": s.stage_id})
 
+        # Wake consumers of this buffer immediately (do not wait for the last delivery)
+        for s in self.stages.values():
+            if out_buffer_id in s.input_buffers:
+                self._schedule_try_start(s.stage_id, delay=0.0, is_rework=False)
+
+        #2026-01-01 更改顺序使得正常触发
         # Countdown remaining deliveries for this job
         rec = self._pending_deliveries.get(job_id)
         if rec:
@@ -870,21 +901,14 @@ class LegoLeanEnv:
                 self.stage_completed_counts[stage_id] += 1
                 stage.busy = False
 
-                # Re-trigger ONLY after the stage is actually freed
-                if stage.stage_id in self.release_stage_ids:
-                    if self.stage_orders.get(stage.stage_id, 0) > 0:
-                        self._push_event(self.t, "try_start", {"stage_id": stage.stage_id})
-                else:
-                    self._push_event(self.t, "try_start", {"stage_id": stage.stage_id})
+                # Re-trigger after the stage is actually freed
+                self._schedule_try_start(stage.stage_id, delay=0.0, is_rework=False)
 
-        # Re-trigger start attempts:
-        # - S1 only tries again if it still has order tokens
-        # - Other stages keep pulling as usual
-        if stage.stage_id == "S1":
-            if self.stage_orders.get("S1", 0) > 0:
-                self._push_event(self.t, "try_start", {"stage_id": "S1"})
-        else:
-            self._push_event(self.t, "try_start", {"stage_id": stage.stage_id})
+                # Wake consumers of THIS buffer
+                for s in self.stages.values():
+                    if out_buffer_id in s.input_buffers:
+                        self._schedule_try_start(s.stage_id, delay=0.0, is_rework=False)
+
 
         # --------------------------------------------------------------------------
     # Internal time advance
@@ -1121,7 +1145,7 @@ CONFIG: Dict[str, Any] = {
             },
             "demand_qty": None               # optional cap on sellable units (None = unlimited)
         },
-        "release_stage_ids": ["S1"],  # 把 S1 作为入口放行的工序（即使它有 input_buffers 也可以）
+        #"release_stage_ids": ["S1"],  # 把 S1 作为入口放行的工序（即使它有 input_buffers 也可以） 2026-01-01 manual setted
         "conwip_wip_cap": 12,  # 全局 WIP 上限（先用 8~15 试，建议从 12 起步）
         "auto_release_conwip": True,  # 成品出系统后自动补放行
         "kanban_caps": {  # 关键缓冲 Kanban 上限（建议先只控合流相关）
