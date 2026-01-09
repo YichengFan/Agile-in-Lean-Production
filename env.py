@@ -166,13 +166,16 @@ class Stage:
     - Pulls required_materials (item_id -> qty) across input buffers.
     - Pushes deterministic outputs: output_buffers (buffer_id -> {item_id: qty}).
     - workers: number of workers at this stage. Processing time scales with total required qty.
+    - Supports model-specific materials: required_materials_by_model (model_id -> {item_id: qty})
     """
     stage_id: Any
     name: str
     team_id: Any
     input_buffers: List[Any] = field(default_factory=list)  # e.g., ['D1', 'D2', 'C3'] for Final Assembly
-    required_materials: Dict[str, int] = field(default_factory=dict)  # BOM-style requirements (item_id -> qty)
+    required_materials: Dict[str, int] = field(default_factory=dict)  # BOM-style requirements (item_id -> qty) - legacy/default
+    required_materials_by_model: Dict[str, Dict[str, int]] = field(default_factory=dict)  # model_id -> {item_id: qty}
     output_buffers: Dict[str, Dict[str, int]] = field(default_factory=dict)  # deterministic outputs with items
+    output_buffers_by_model: Dict[str, Dict[str, Dict[str, int]]] = field(default_factory=dict)  # model_id -> {buffer_id: {item_id: qty}}
 
     base_process_time_sec: float = 1.0
     time_distribution: Dict[str, Any] = field(default_factory=dict)
@@ -255,7 +258,9 @@ class LegoLeanEnv:
                 team_id=s.get("team_id"),
                 input_buffers=in_bufs,
                 required_materials=s.get("required_materials") or {},
+                required_materials_by_model=s.get("required_materials_by_model") or {},
                 output_buffers=s.get("output_buffers") or {},
+                output_buffers_by_model=s.get("output_buffers_by_model") or {},
                 base_process_time_sec=float(s.get("base_process_time_sec") or 1.0),
                 time_distribution=s.get("time_distribution") or {},
                 transport_time_sec=float(s.get("transport_time_sec") or 0.0),
@@ -352,6 +357,12 @@ class LegoLeanEnv:
 
         # FIFO queue of release timestamps (one per released unit) to compute lead times at completion
         self._release_times = deque()
+        
+        # Model type tracking: map job_id to model_id
+        self._job_model_map: Dict[int, str] = {}
+        
+        # Model definitions from config
+        self.model_definitions = self.cfg.get("models", {})  # model_id -> model config
 
         #2026-01-01 tracelog 弄上去了
 
@@ -434,14 +445,28 @@ class LegoLeanEnv:
     # Public API
     # --------------------------------------------------------------------------
 
-    def enqueue_orders(self, qty: int = 1):
+    def enqueue_orders(self, qty: int = 1, model_id: Optional[str] = None):
         """
         Release 'qty' orders into the system (CONWIP-aware).
         Adds order tokens to release stages (e.g., S1) and triggers try_start.
+        
+        Args:
+            qty: Number of orders to release
+            model_id: Model type identifier (e.g., "M1", "M2", "M3", "M4"). 
+                     If None, uses default model or first available model.
         """
         qty = int(qty)
         if qty <= 0:
             return
+
+        # Determine model_id if not provided
+        if model_id is None:
+            # Use default model from config, or first model if available
+            model_id = self.parameters.get("default_model_id")
+            if model_id is None and self.model_definitions:
+                model_id = list(self.model_definitions.keys())[0]
+            if model_id is None:
+                model_id = "default"  # fallback to legacy behavior
 
         # Enforce CONWIP WIP cap (if enabled)
         cap = self.parameters.get("conwip_wip_cap", None)
@@ -458,15 +483,26 @@ class LegoLeanEnv:
         self.started += qty
 
         # Track release timestamps for lead-time KPI (FIFO)
+        # Also track model types for each release
         for _ in range(qty):
             self._release_times.append(self.t)
+            # We'll assign model_id to job_id when the job starts at the release stage
 
         # Allocate order tokens to release stages and trigger try_start
+        # Store model_id in stage orders for later assignment to jobs
         for s_id in self.release_stage_ids:
-            self.stage_orders[s_id] = self.stage_orders.get(s_id, 0) + qty
+            current_orders = self.stage_orders.get(s_id, 0)
+            self.stage_orders[s_id] = current_orders + qty
+            # Store model_id for this batch of orders (we'll use it when jobs start)
+            if not hasattr(self, '_stage_order_models'):
+                self._stage_order_models = {}
+            if s_id not in self._stage_order_models:
+                self._stage_order_models[s_id] = []
+            # Append model_id for each order in this batch
+            self._stage_order_models[s_id].extend([model_id] * qty)
             self._schedule_try_start(s_id, delay=0.0, is_rework=False)
 
-        self.log.append(f"{self._fmt_t()} Released {qty} order(s) into {sorted(self.release_stage_ids)}.")
+        self.log.append(f"{self._fmt_t()} Released {qty} order(s) of model '{model_id}' into {sorted(self.release_stage_ids)}.")
 
     def step(self) -> Optional[Event]:
         """
@@ -644,6 +680,7 @@ class LegoLeanEnv:
             return
 
         is_rework = bool(ev.payload.get("is_rework", False))
+        model_id = ev.payload.get("model_id")  # Get model_id from event if provided
 
         # This try_start is now being processed; clear any pending flag for this stage
         self._try_start_scheduled.discard((stage.stage_id, is_rework))
@@ -657,8 +694,39 @@ class LegoLeanEnv:
             if self.stage_orders.get(stage.stage_id, 0) <= 0:
                 return
             self.stage_orders[stage.stage_id] -= 1
+            # Get model_id from the queue for this release stage
+            if hasattr(self, '_stage_order_models') and stage.stage_id in self._stage_order_models:
+                if self._stage_order_models[stage.stage_id]:
+                    model_id = self._stage_order_models[stage.stage_id].pop(0)
+                else:
+                    # Fallback if queue is empty
+                    model_id = self.parameters.get("default_model_id") or "default"
+            else:
+                model_id = self.parameters.get("default_model_id") or "default"
+        elif model_id is None:
+            # For non-release stages, try to infer model_id from recent jobs or use default
+            # In a real system, you might track model_id per buffer item, but for simplicity
+            # we use the default model if not specified
+            model_id = self.parameters.get("default_model_id") or "default"
+            # Note: In a more sophisticated implementation, you could track which model
+            # produced items in each buffer, but for now we use default when not specified
+
+        # Get model-specific materials if available, otherwise use default
+        required_materials = stage.required_materials.copy() if stage.required_materials else {}
+        if model_id and model_id != "default" and stage.required_materials_by_model:
+            model_materials = stage.required_materials_by_model.get(model_id)
+            if model_materials:
+                required_materials = model_materials.copy()
+        
+        # Get model-specific outputs if available
+        output_buffers = stage.output_buffers.copy() if stage.output_buffers else {}
+        if model_id and model_id != "default" and stage.output_buffers_by_model:
+            model_outputs = stage.output_buffers_by_model.get(model_id)
+            if model_outputs:
+                output_buffers = model_outputs.copy()
+
         # Kanban gating: prevent starting if controlled output buffers would exceed caps
-        for out_b_id, materials in (stage.output_buffers or {}).items():
+        for out_b_id, materials in output_buffers.items():
             cap = self.kanban_caps.get(str(out_b_id))
             if cap is None:
                 continue
@@ -669,16 +737,21 @@ class LegoLeanEnv:
             projected = ob.total_items() + sum(int(q) for q in materials.values())
             if projected > cap:
                 self.kanban_blocking_counts[stage.stage_id] += 1
-                self._schedule_try_start(stage.stage_id, delay=0.5, is_rework=is_rework)
+                # Preserve model_id in retry
+                self._push_event(self.t + 0.5, "try_start", {
+                    "stage_id": stage.stage_id, 
+                    "is_rework": is_rework,
+                    "model_id": model_id
+                })
                 return
 
         # Check inputs (BOM mode only)
         pulled_items: List[tuple] = []  # (buf, item_id, qty) for rollback if needed
 
-        bom_mode = bool(stage.required_materials)
+        bom_mode = bool(required_materials)
 
-        if stage.required_materials:
-            for item_id, required_qty in stage.required_materials.items():
+        if required_materials:
+            for item_id, required_qty in required_materials.items():
                 pulled = False
                 for b_id in stage.input_buffers:
                     buf = self.buffers.get(b_id)
@@ -694,8 +767,13 @@ class LegoLeanEnv:
                     for pb, it, qty in pulled_items:
                         pb.push_item(it, qty)
                     self.starvation_counts[stage.stage_id] += 1
-                    self.log.append(f"{self._fmt_t()} '{stage.name}' waiting: insufficient '{item_id}' (need {required_qty}).")
-                    self._schedule_try_start(stage.stage_id, delay=0.5, is_rework=is_rework)
+                    self.log.append(f"{self._fmt_t()} '{stage.name}' waiting: insufficient '{item_id}' (need {required_qty}) for model '{model_id}'.")
+                    # Preserve model_id in retry
+                    self._push_event(self.t + 0.5, "try_start", {
+                        "stage_id": stage.stage_id, 
+                        "is_rework": is_rework,
+                        "model_id": model_id
+                    })
                     return
 
         # Engage team (utilization starts)
@@ -706,7 +784,7 @@ class LegoLeanEnv:
         stage.busy = True
 
         # Draw processing time from distribution + optional disruption penalty
-        total_parts = sum(stage.required_materials.values()) if stage.required_materials else 1
+        total_parts = sum(required_materials.values()) if required_materials else 1
         base_time_per_unit = (stage.base_process_time_sec * max(1, total_parts)) / max(1, stage.workers)
         ptime = sample_time(stage.time_distribution, base_time_per_unit)
 
@@ -720,6 +798,15 @@ class LegoLeanEnv:
         # Assign a job_id to this completion (needed if we split into multiple deliveries)
         self._job_seq += 1
         job_id = self._job_seq
+        
+        # Store model_id for this job
+        if model_id:
+            self._job_model_map[job_id] = model_id
+        
+        # Store model-specific outputs and materials for this job
+        stage._current_job_outputs = output_buffers
+        stage._current_job_model = model_id
+        
         # If per-output transport is configured, "complete" means processing done (no transport yet).
         # Otherwise, keep old behavior (processing + transport in one finish_t).
         if getattr(stage, "transport_time_to_outputs_sec", None):
@@ -728,7 +815,11 @@ class LegoLeanEnv:
         else:
             finish_t = self.t + ptime + float(stage.transport_time_sec or 0.0)
 
-        self._push_event(finish_t, "complete", {"stage_id": stage.stage_id, "job_id": job_id})
+        self._push_event(finish_t, "complete", {
+            "stage_id": stage.stage_id, 
+            "job_id": job_id,
+            "model_id": model_id
+        })
 
         # Remember pulled items for BOM blocking retries
         if bom_mode:
@@ -743,9 +834,13 @@ class LegoLeanEnv:
         # Release team (utilization ends)
         team = self.teams.get(stage.team_id)
         job_id = ev.payload.get("job_id")
+        model_id = ev.payload.get("model_id") or self._job_model_map.get(job_id)
 
         if team:
             team.stop_busy(self.t)
+
+        # Get model-specific outputs (use stored outputs from try_start if available)
+        output_buffers = getattr(stage, "_current_job_outputs", None) or stage.output_buffers.copy()
 
         # Defect handling (rework or scrap)
         proceed_to_output = True
@@ -755,16 +850,20 @@ class LegoLeanEnv:
             proceed_to_output = False
 
             if stage.rework_stage_id and stage.rework_stage_id in self.stages:
-                # Mark as rework so it bypasses release-stage token gating
-                self._push_event(self.t, "try_start", {"stage_id": stage.rework_stage_id, "is_rework": True})
+                # Mark as rework so it bypasses release-stage token gating, preserve model_id
+                self._push_event(self.t, "try_start", {
+                    "stage_id": stage.rework_stage_id, 
+                    "is_rework": True,
+                    "model_id": model_id
+                })
                 self.log.append(
-                    f"{self._fmt_t()} '{stage.name}' defect → rework at '{stage.rework_stage_id}'."
+                    f"{self._fmt_t()} '{stage.name}' defect → rework at '{stage.rework_stage_id}' (model '{model_id}')."
                 )
             else:
                 # Scrap: item leaves the system -> reduce WIP and (FIFO) drop its release time
                 self._accumulate_wip(self.t)
                 self.current_wip = max(0, self.current_wip - 1)
-                self.log.append(f"{self._fmt_t()} '{stage.name}' defect → scrapped item.")
+                self.log.append(f"{self._fmt_t()} '{stage.name}' defect → scrapped item (model '{model_id}').")
                 if self._release_times:
                     self._release_times.popleft()
 
@@ -776,8 +875,12 @@ class LegoLeanEnv:
         if proceed_to_output:
             # --- NEW: per-output transport (e.g. S2 -> C1/C2/C3) ---
             if getattr(stage, "transport_time_to_outputs_sec", None):
-                outputs = list(stage.output_buffers.items())
-                self._pending_deliveries[job_id] = {"stage_id": stage.stage_id, "remaining": len(outputs)}
+                outputs = list(output_buffers.items())
+                self._pending_deliveries[job_id] = {
+                    "stage_id": stage.stage_id, 
+                    "remaining": len(outputs),
+                    "model_id": model_id
+                }
 
                 for out_buffer_id, materials in outputs:
                     delay = float(
@@ -787,6 +890,7 @@ class LegoLeanEnv:
                         "job_id": job_id,
                         "out_buffer_id": out_buffer_id,
                         "materials": materials,
+                        "model_id": model_id
                     })
 
                 # IMPORTANT:
@@ -796,7 +900,7 @@ class LegoLeanEnv:
             all_push_success = True
             pushed_buffers: List[str] = []
             outputs_logged: List[tuple] = []
-            for out_buffer_id, materials in stage.output_buffers.items():
+            for out_buffer_id, materials in output_buffers.items():
                 ob = self.buffers.get(out_buffer_id)
                 if not ob:
                     self.log.append(f"{self._fmt_t()} '{stage.name}' error: missing output buffer '{out_buffer_id}'.")
@@ -815,19 +919,29 @@ class LegoLeanEnv:
                     if str(out_buffer_id) in [str(x) for x in self.finished_buffers]:
                         self._on_unit_finished(qty)
                         self.log.append(
-                            f"{self._fmt_t()} Product finished into buffer '{out_buffer_id}'. Finished={self.finished}")
+                            f"{self._fmt_t()} Product (model '{model_id}') finished into buffer '{out_buffer_id}'. Finished={self.finished}")
             if all_push_success:
                 self.stage_completed_counts[stage.stage_id] += 1
                 chosen_out = pushed_buffers[0] if pushed_buffers else None
 
         # Free the stage and immediately attempt next start at this stage
         stage.busy = False
+        # Clear stored job-specific data
+        if hasattr(stage, "_current_job_outputs"):
+            delattr(stage, "_current_job_outputs")
+        if hasattr(stage, "_current_job_model"):
+            delattr(stage, "_current_job_model")
         self._schedule_try_start(stage.stage_id, delay=0.0, is_rework=False)
-        # Wake consumers of pushed buffers
+        # Wake consumers of pushed buffers - pass model_id if available
         for s in self.stages.values():
-            for b in stage.output_buffers.keys():
+            for b in output_buffers.keys():
                 if b in s.input_buffers and not s.busy:
-                    self._schedule_try_start(s.stage_id, delay=0.0, is_rework=False)
+                    # Try to pass model_id to downstream stages
+                    self._push_event(self.t, "try_start", {
+                        "stage_id": s.stage_id, 
+                        "is_rework": False,
+                        "model_id": model_id
+                    })
 
         # Assembly trace logging (consumed → produced)
         if self.trace_assembly and proceed_to_output:
@@ -853,6 +967,7 @@ class LegoLeanEnv:
         job_id = ev.payload.get("job_id")
         out_buffer_id = ev.payload.get("out_buffer_id")
         materials = ev.payload.get("materials") or {}
+        model_id = ev.payload.get("model_id") or self._job_model_map.get(job_id)
 
         stage = self.stages.get(stage_id)
         ob = self.buffers.get(out_buffer_id)
@@ -887,9 +1002,14 @@ class LegoLeanEnv:
 
 
         # Wake consumers of this buffer immediately (do not wait for the last delivery)
+        # Pass model_id to downstream stages
         for s in self.stages.values():
             if out_buffer_id in s.input_buffers:
-                self._schedule_try_start(s.stage_id, delay=0.0, is_rework=False)
+                self._push_event(self.t, "try_start", {
+                    "stage_id": s.stage_id, 
+                    "is_rework": False,
+                    "model_id": model_id
+                })
 
         #2026-01-01 更改顺序使得正常触发
         # Countdown remaining deliveries for this job
@@ -904,10 +1024,14 @@ class LegoLeanEnv:
                 # Re-trigger after the stage is actually freed
                 self._schedule_try_start(stage.stage_id, delay=0.0, is_rework=False)
 
-                # Wake consumers of THIS buffer
+                # Wake consumers of THIS buffer - pass model_id
                 for s in self.stages.values():
                     if out_buffer_id in s.input_buffers:
-                        self._schedule_try_start(s.stage_id, delay=0.0, is_rework=False)
+                        self._push_event(self.t, "try_start", {
+                            "stage_id": s.stage_id, 
+                            "is_rework": False,
+                            "model_id": model_id
+                        })
 
 
         # --------------------------------------------------------------------------
@@ -1045,6 +1169,7 @@ CONFIG: Dict[str, Any] = {
             "team_id": "T2",
             "input_buffers": ["B"],
             # Build three kits from classified parts in B
+            # Default materials (used if model_id is "default" or not found in required_materials_by_model)
             "required_materials": {
                 "a01": 1, "a03": 2, "a05": 2, "a06": 1, "a07": 2,
                 "b01": 1, "b02": 2, "b04": 1, "b05": 2, "b07": 1,
@@ -1053,10 +1178,27 @@ CONFIG: Dict[str, Any] = {
                 "c01": 1, "c02": 1, "c03": 1, "c04": 1, "c05": 4, "c07": 1, "c08": 1,
                 "x01": 3, "x02": 4, "x03": 2
             },
+            #Model-specific input materials (optional - overrides required_materials when model_id matches)
+            "required_materials_by_model": {
+                # Example structure - customize per model as needed:
+                "m01": {"a01": 1, "a03": 1},  # Sly_Slider specific materials
+                "m02": {"a01": 1, "a03": 1},  # Gliderlinski specific materials
+                "m03": {"a01": 1, "a03": 1},  # Icky_Ice_Glider specific materials
+                "m04": {"a01": 1, "a03": 1}   # Icomat_2000X specific materials
+            },
+            # Default outputs
             "output_buffers": {
                 "C1": {"bun01": 1},   # Axis set
                 "C2": {"bun02": 1},   # Chassis set
                 "C3": {"bun03": 1}    # Final set
+            },
+            # Model-specific outputs (optional - different models may produce different kits)
+            "output_buffers_by_model": {
+                # Example structure - customize per model as needed:
+                "m01": {"C1": {"bun01": 1}, "C2": {"bun02": 1}, "C3": {"bun03": 1}},
+                "m02": {"C1": {"bun01": 1}, "C2": {"bun02": 1}, "C3": {"bun03": 1}},
+                "m03": {"C1": {"bun01": 1}, "C2": {"bun02": 1}, "C3": {"bun03": 1}},
+                "m04": {"C1": {"bun01": 1}, "C2": {"bun02": 1}, "C3": {"bun03": 1}}
             },
             "base_process_time_sec": 3.0,
             "time_distribution": {"type": "triangular", "p1": 2.0, "p2": 3.0, "p3": 5.0},
@@ -1070,8 +1212,26 @@ CONFIG: Dict[str, Any] = {
             "name": "Axis Subassembly",
             "team_id": "T3",
             "input_buffers": ["C1"],
+            # Default materials
             "required_materials": {"bun01": 1},
+            # Model-specific input materials (optional - overrides required_materials when model_id matches)
+            "required_materials_by_model": {
+                # Example structure - customize per model as needed:
+                "m01": {"bun01": 1},  # Sly_Slider
+                "m02": {"bun01": 1},  # Gliderlinski
+                "m03": {"bun01": 1},  # Icky_Ice_Glider
+                "m04": {"bun01": 1}   # Icomat_2000X
+            },
+            # Default outputs
             "output_buffers": {"D1": {"saa01": 1}},
+            # Model-specific outputs (optional - different models may produce different subassemblies)
+            "output_buffers_by_model": {
+                # Example structure - customize per model as needed:
+                "m01": {"D1": {"saa01": 1}},  # Sly_Slider
+                "m02": {"D1": {"saa01": 1}},  # Gliderlinski
+                "m03": {"D1": {"saa01": 1}},  # Icky_Ice_Glider
+                "m04": {"D1": {"saa01": 1}}   # Icomat_2000X
+            },
             "base_process_time_sec": 4.0,
             "time_distribution": {"type": "triangular", "p1": 3.0, "p2": 4.0, "p3": 6.0},
             "transport_time_sec": 0.4,
@@ -1084,8 +1244,26 @@ CONFIG: Dict[str, Any] = {
             "name": "Chassis Subassembly",
             "team_id": "T4",
             "input_buffers": ["C2"],
+            # Default materials
             "required_materials": {"bun02": 1},
+            # Model-specific input materials (optional - overrides required_materials when model_id matches)
+            "required_materials_by_model": {
+                # Example structure - customize per model as needed:
+                "m01": {"bun02": 1},  # Sly_Slider
+                "m02": {"bun02": 1},  # Gliderlinski
+                "m03": {"bun02": 1},  # Icky_Ice_Glider 
+                "m04": {"bun02": 1}   # Icomat_2000X
+            },
+            # Default outputs
             "output_buffers": {"D2": {"sac01": 1}},
+            # Model-specific outputs (optional - different models may produce different subassemblies)
+            "output_buffers_by_model": {
+                # Example structure - customize per model as needed:
+                "m01": {"D2": {"sac01": 1}},  # Sly_Slider
+                "m02": {"D2": {"sac01": 1}},  # Gliderlinski
+                "m03": {"D2": {"sac01": 1}},  # Icky_Ice_Glider
+                "m04": {"D2": {"sac01": 1}}   # Icomat_2000X
+            },
             "base_process_time_sec": 4.0,
             "time_distribution": {"type": "triangular", "p1": 3.0, "p2": 4.0, "p3": 6.0},
             "transport_time_sec": 0.4,
@@ -1098,8 +1276,27 @@ CONFIG: Dict[str, Any] = {
             "name": "Final Assembly",
             "team_id": "T5",
             "input_buffers": ["C3", "D1", "D2"],
+            # Default materials (used if model_id is "default" or not found in required_materials_by_model)
             "required_materials": {"bun03": 1, "saa01": 1, "sac01": 1},
+            # Model-specific materials (optional - overrides required_materials when model_id matches)
+            # Example: Different models may require different quantities or different parts
+            "required_materials_by_model": {
+                # Example structure - customize per model as needed:
+                "m01": {"bun03": 1, "saa01": 1, "sac01": 1},  # Sly_Slider
+                "m02": {"bun03": 2, "saa01": 1, "sac01": 1},  # Gliderlinski: needs extra bun03
+                "m03": {"bun03": 1, "saa01": 1, "sac01": 1},  # Icky_Ice_Glider: no sac01
+                "m04": {"bun03": 1, "saa01": 1, "sac01": 1}   # Icomat_2000X: double saa01
+            },
+            # Default outputs
             "output_buffers": {"E": {"fg01": 1}},
+            # Model-specific outputs (optional - different models produce different finished goods)
+            "output_buffers_by_model": {
+                # Example structure - customize per model as needed:
+                "m01": {"E": {"fg01": 1}},  # Sly_Slider
+                "m02": {"E": {"fg02": 1}},  # Gliderlinski
+                "m03": {"E": {"fg03": 1}},  # Icky_Ice_Glider
+                "m04": {"E": {"fg04": 1}}    # Icomat_2000X
+            },
             "base_process_time_sec": 5.0,
             "time_distribution": {"type": "triangular", "p1": 4.0, "p2": 5.0, "p3": 7.0},
             "transport_time_sec": 0.5,
@@ -1117,9 +1314,33 @@ CONFIG: Dict[str, Any] = {
     ],
 
     # ----------------------------------------------------------------------------
+    # Model definitions (optional - for multi-model support)
+    # Each model can have different material requirements at different stages
+    # ----------------------------------------------------------------------------
+    "models": {
+        "m01": {
+            "name": "Sly_Slider",
+            "description": "Sly Slider model configuration"
+        },
+        "m02": {
+            "name": "Gliderlinski",
+            "description": "Gliderlinski model configuration"
+        },
+        "m03": {
+            "name": "Icky_Ice_Glider",
+            "description": "Icky Ice Glider model configuration"
+        },
+        "m04": {
+            "name": "Icomat_2000X",
+            "description": "Icomat 2000X model configuration"
+        }
+    },
+
+    # ----------------------------------------------------------------------------
     # Global parameters (optional, free-form)
     # ----------------------------------------------------------------------------
     "parameters": {
+        "default_model_id": "m01",  # Default model if not specified
         "target_takt_sec": 10.0,
         "timeline_sample_dt_sec": 5.0,
         "finished_buffer_ids": ["E"],
