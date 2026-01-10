@@ -640,9 +640,14 @@ class LegoLeanEnv:
         cost_total = self.cost_material + labor_cost + inventory_cost + self.cost_other
         profit = revenue_total - cost_total
         # 2026-01-09: Charge opportunity cost only for overproduction relative to realized demand.
-        overproduction = max(0, self.finished - demand_realized_total)
-        opportunity_cost = self.margin_per_unit * overproduction
-        profit_after_opportunity = profit - opportunity_cost
+        # 2026-01-10: opportunity cost 弄反了
+       #这个应该在inventory cost and material cost 算 overproduction = max(0, self.finished - demand_realized_total)
+        #opportunity_cost = self.margin_per_unit * overproduction
+        #profit_after_opportunity = profit - opportunity_cost
+        # Opportunity cost KPI (unmet demand): unrealized contribution margin
+        unmet_demand = max(0, int(demand_realized_total) - int(sales_units))
+        opportunity_cost = self.margin_per_unit * unmet_demand
+
         availability = 1.0
         if demand_realized_total > 0:
             availability = min(1.0, self.finished / demand_realized_total)
@@ -682,7 +687,8 @@ class LegoLeanEnv:
             "cost_total": cost_total,
             "profit": profit,
             "opportunity_cost": opportunity_cost,
-            "profit_after_opportunity": profit_after_opportunity,
+            #2026-01-10
+           # "profit_after_opportunity": profit_after_opportunity,
             "availability": availability,
             "avg_buffer_levels": avg_buffer_levels,
         }
