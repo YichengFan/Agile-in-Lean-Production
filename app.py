@@ -43,6 +43,7 @@ with st.sidebar:
     enable_pull = st.checkbox("Enable Pull (CONWIP + Kanban)", value=True)
     if enable_pull:
         st.markdown("### Pull Control (CONWIP + Kanban)")
+        cfg["parameters"]["push_demand_enabled"] = False
         conwip_cap = st.number_input("CONWIP WIP cap", min_value=0,
                                      value=int(cfg["parameters"].get("conwip_wip_cap", 12)), step=1)
         auto_release = st.checkbox("Closed-loop CONWIP (auto release on finish)",
@@ -62,6 +63,52 @@ with st.sidebar:
                               value=int(cfg["parameters"].get("kanban_caps", {}).get("D1", 4)), step=1)
         kd2 = st.number_input("Kanban cap: D2", min_value=0,
                               value=int(cfg["parameters"].get("kanban_caps", {}).get("D2", 4)), step=1)
+    else:
+        st.markdown("### Push Planning (Demand-based)")
+        horizon_weeks = st.number_input(
+            "Demand horizon (weeks)",
+            min_value=1, value=int(cfg["parameters"].get("push_demand_horizon_weeks", 3)), step=1
+        )
+        weekly_mean = st.number_input(
+            "Forecast weekly demand (units)",
+            min_value=0, value=int(cfg["parameters"].get("push_weekly_demand_mean", 30)), step=1
+        )
+        forecast_noise_pct = st.slider(
+            "Forecast noise (±%)",
+            min_value=0, max_value=50, value=int(float(cfg["parameters"].get("push_forecast_noise_pct", 0.1)) * 100)
+        )
+        real_noise_pct = st.slider(
+            "Realization noise (±%)",
+            min_value=0, max_value=50, value=int(float(cfg["parameters"].get("push_realization_noise_pct", 0.05)) * 100)
+        )
+        waste_pct = st.slider(
+            "Procurement waste/safety stock (%)",
+            min_value=0, max_value=30, value=int(float(cfg["parameters"].get("push_procurement_waste_rate", 0.05)) * 100)
+        )
+        auto_release_push = st.checkbox(
+            "Auto release planned qty at start",
+            value=bool(cfg["parameters"].get("push_auto_release", True))
+        )
+        margin_per_unit = st.number_input(
+            "Margin per unit",
+            min_value=0.0,
+            value=float(cfg["parameters"].get("cost", {}).get("margin_per_unit", 5600.0)),
+            step=100.0
+        )
+        cfg["parameters"]["push_demand_enabled"] = True
+        cfg["parameters"]["push_demand_horizon_weeks"] = int(horizon_weeks)
+        cfg["parameters"]["push_weekly_demand_mean"] = float(weekly_mean)
+        cfg["parameters"]["push_forecast_noise_pct"] = float(forecast_noise_pct) / 100.0
+        cfg["parameters"]["push_realization_noise_pct"] = float(real_noise_pct) / 100.0
+        cfg["parameters"]["push_procurement_waste_rate"] = float(waste_pct) / 100.0
+        cfg["parameters"]["push_auto_release"] = bool(auto_release_push)
+        cfg["parameters"]["material_cost_mode"] = "procure_forecast"
+        cfg["parameters"]["release_stage_ids"] = ["S1"]
+        cfg["parameters"]["conwip_wip_cap"] = None
+        cfg["parameters"]["auto_release_conwip"] = False
+        cfg["parameters"]["kanban_caps"] = {}
+        cfg["parameters"].setdefault("cost", {})
+        cfg["parameters"]["cost"]["margin_per_unit"] = float(margin_per_unit)
     sim_time = st.number_input("Simulation time (seconds)", min_value=1, value=3600, step=60)
 
     use_random_seed = st.checkbox("Use random seed", value=False)
@@ -71,7 +118,10 @@ with st.sidebar:
         seed = st.number_input("Random seed", min_value=0, value=42, step=1)
 
     # Pull-mode release: initial injection only (then closed-loop CONWIP can replenish)
-    initial_release = st.number_input("Initial release qty (CONWIP)", min_value=0, value=12, step=1)
+    # 2026-01-09: Only show/use initial release when Pull is enabled.
+    initial_release = 0
+    if enable_pull:
+        initial_release = st.number_input("Initial release qty (CONWIP)", min_value=0, value=12, step=1)
 
     deterministic = st.checkbox("Deterministic processing (override times; disable disruptions)", value=False)
     show_logs_n = st.number_input("Show last N logs", min_value=0, value=30, step=5)
@@ -97,70 +147,71 @@ with c2:
     cfg["parameters"]["timeline_sample_dt_sec"] = float(sample_dt)
 
 
-st.markdown("---")
-st.subheader("Pull Control (CONWIP + Kanban)")
+if enable_pull:
+    # 2026-01-09: Pull controls are only shown when pull mode is enabled.
+    st.markdown("---")
+    st.subheader("Pull Control (CONWIP + Kanban)")
 
-p1, p2, p3 = st.columns(3)
-with p1:
-    conwip_cap = st.number_input(
-        "CONWIP WIP cap",
-        min_value=0,
-        value=int(cfg["parameters"].get("conwip_wip_cap", 12) or 0),
-        step=1
-    )
-    # If cap==0 -> treat as disabled by setting None (optional convention)
-    cfg["parameters"]["conwip_wip_cap"] = None if int(conwip_cap) <= 0 else int(conwip_cap)
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        conwip_cap = st.number_input(
+            "CONWIP WIP cap",
+            min_value=0,
+            value=int(cfg["parameters"].get("conwip_wip_cap", 12) or 0),
+            step=1
+        )
+        # If cap==0 -> treat as disabled by setting None (optional convention)
+        cfg["parameters"]["conwip_wip_cap"] = None if int(conwip_cap) <= 0 else int(conwip_cap)
 
-with p2:
-    auto_release = st.checkbox(
-        "Closed-loop CONWIP (auto release on finish)",
-        value=bool(cfg["parameters"].get("auto_release_conwip", True))
-    )
-    cfg["parameters"]["auto_release_conwip"] = bool(auto_release)
+    with p2:
+        auto_release = st.checkbox(
+            "Closed-loop CONWIP (auto release on finish)",
+            value=bool(cfg["parameters"].get("auto_release_conwip", True))
+        )
+        cfg["parameters"]["auto_release_conwip"] = bool(auto_release)
 
-with p3:
-    # release_stage_ids: allow selecting which stages are gated by order tokens
-    all_stage_ids = [s["stage_id"] for s in cfg["stages"]]
-    default_release = cfg["parameters"].get("release_stage_ids", ["S1"])
-    release_stage_ids = st.multiselect(
-        "Release stage(s) (token-gated)",
-        options=all_stage_ids,
-        default=default_release if default_release else ["S1"]
-    )
-    cfg["parameters"]["release_stage_ids"] = list(release_stage_ids)
+    with p3:
+        # release_stage_ids: allow selecting which stages are gated by order tokens
+        all_stage_ids = [s["stage_id"] for s in cfg["stages"]]
+        default_release = cfg["parameters"].get("release_stage_ids", ["S1"])
+        release_stage_ids = st.multiselect(
+            "Release stage(s) (token-gated)",
+            options=all_stage_ids,
+            default=default_release if default_release else ["S1"]
+        )
+        cfg["parameters"]["release_stage_ids"] = list(release_stage_ids)
 
+    st.markdown("**Kanban caps (control limits, not physical capacities)**")
+    kcfg = cfg["parameters"].get("kanban_caps", {}) or {}
+    k1, k2, k3, k4 = st.columns(4)
 
-st.markdown("**Kanban caps (control limits, not physical capacities)**")
-kcfg = cfg["parameters"].get("kanban_caps", {}) or {}
-k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        cap_c3 = st.number_input("Kanban cap: C3", min_value=0, value=int(kcfg.get("C3", 4)), step=1)
+    with k2:
+        cap_d1 = st.number_input("Kanban cap: D1", min_value=0, value=int(kcfg.get("D1", 4)), step=1)
+    with k3:
+        cap_d2 = st.number_input("Kanban cap: D2", min_value=0, value=int(kcfg.get("D2", 4)), step=1)
+    with k4:
+        # Optional: allow user to paste full dict for advanced control
+        adv_kanban = st.text_area(
+            "Kanban caps override (JSON dict, optional)",
+            value="",
+            height=80,
+            help='Example: {"C1": 5, "C2": 5, "C3": 4, "D1": 4, "D2": 4}'
+        )
 
-with k1:
-    cap_c3 = st.number_input("Kanban cap: C3", min_value=0, value=int(kcfg.get("C3", 4)), step=1)
-with k2:
-    cap_d1 = st.number_input("Kanban cap: D1", min_value=0, value=int(kcfg.get("D1", 4)), step=1)
-with k3:
-    cap_d2 = st.number_input("Kanban cap: D2", min_value=0, value=int(kcfg.get("D2", 4)), step=1)
-with k4:
-    # Optional: allow user to paste full dict for advanced control
-    adv_kanban = st.text_area(
-        "Kanban caps override (JSON dict, optional)",
-        value="",
-        height=80,
-        help='Example: {"C1": 5, "C2": 5, "C3": 4, "D1": 4, "D2": 4}'
-    )
+    kanban_caps = {"C3": int(cap_c3), "D1": int(cap_d1), "D2": int(cap_d2)}
+    if adv_kanban.strip():
+        try:
+            parsed = json.loads(adv_kanban)
+            if isinstance(parsed, dict):
+                # Merge/override
+                for k, v in parsed.items():
+                    kanban_caps[str(k)] = int(v)
+        except Exception:
+            st.warning("Kanban caps override JSON invalid; ignored.")
 
-kanban_caps = {"C3": int(cap_c3), "D1": int(cap_d1), "D2": int(cap_d2)}
-if adv_kanban.strip():
-    try:
-        parsed = json.loads(adv_kanban)
-        if isinstance(parsed, dict):
-            # Merge/override
-            for k, v in parsed.items():
-                kanban_caps[str(k)] = int(v)
-    except Exception:
-        st.warning("Kanban caps override JSON invalid; ignored.")
-
-cfg["parameters"]["kanban_caps"] = kanban_caps
+    cfg["parameters"]["kanban_caps"] = kanban_caps
 
 
 st.markdown("---")
@@ -358,17 +409,14 @@ if st.button("Run Simulation"):
         cfg["parameters"]["auto_release_conwip"] = bool(auto_release)
         cfg["parameters"]["kanban_caps"] = {"C3": int(kc1), "D1": int(kd1), "D2": int(kd2)}
     else:
-        # Disable pull control explicitly (back to push)
-        cfg["parameters"]["release_stage_ids"] = []  # or ["S1"] but with no gating
-        cfg["parameters"]["conwip_wip_cap"] = None
-        cfg["parameters"]["auto_release_conwip"] = False
-        cfg["parameters"]["kanban_caps"] = {}
+        # Push: keep demand-based settings already written in the sidebar
+        cfg["parameters"]["release_stage_ids"] = cfg["parameters"].get("release_stage_ids", ["S1"])
 
     # Build env
     env = LegoLeanEnv(cfg, time_unit="sec", seed=(None if seed is None else int(seed)))
 
     # Pull-mode: initial release only (then closed-loop CONWIP replenishes if enabled)
-    if int(initial_release) > 0:
+    if enable_pull and int(initial_release) > 0:
         env.enqueue_orders(qty=int(initial_release))
 
     #2026-01-01 存疑，如果是push的话enqueue激活就够了，这样是否会反复激活S1？

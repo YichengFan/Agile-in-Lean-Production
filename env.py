@@ -281,6 +281,9 @@ class LegoLeanEnv:
         cost_cfg = self.parameters.get("cost", {})
         self.unit_price = float(cost_cfg.get("unit_price", 0.0))
         self.unit_material_cost = float(cost_cfg.get("unit_material_cost", 0.0))
+        # 2026-01-09: Allow procurement-based costing and explicit margin tracking for push mode economics.
+        self.material_cost_mode = (self.parameters.get("material_cost_mode") or "procure_forecast")
+        self.margin_per_unit = float(cost_cfg.get("margin_per_unit", max(0.0, self.unit_price - self.unit_material_cost)))
         self.labor_costs_per_team = {
             str(k): float(v) for k, v in (cost_cfg.get("labor_costs_per_team_sec") or {}).items()
         }
@@ -298,6 +301,22 @@ class LegoLeanEnv:
         self.cost_labor: float = 0.0
         self.cost_inventory: float = 0.0
         self.cost_other: float = 0.0
+        # 2026-01-09: Push demand planning knobs (finite push based on forecast/realization).
+        self.push_demand_enabled: bool = bool(self.parameters.get("push_demand_enabled", False))
+        self.push_auto_release: bool = bool(self.parameters.get("push_auto_release", True))
+        self.push_demand_horizon_weeks: int = int(self.parameters.get("push_demand_horizon_weeks", 3) or 3)
+        self.push_weekly_demand_mean: float = float(self.parameters.get("push_weekly_demand_mean", 30.0))
+        self.push_forecast_noise_pct: float = float(self.parameters.get("push_forecast_noise_pct", 0.1))
+        self.push_realization_noise_pct: float = float(self.parameters.get("push_realization_noise_pct", 0.05))
+        self.push_procurement_waste_rate: float = float(self.parameters.get("push_procurement_waste_rate", 0.05))
+        # 2026-01-09: Stage IDs that act as supplier drops (skip processing, push parts to buffers in push mode).
+        self.supplier_stage_ids: set = set()
+        # Demand bookkeeping
+        self.demand_forecast: List[int] = []
+        self.demand_realized: List[int] = []
+        self.planned_release_qty: int = 0
+        self.realized_demand_total: int = 0
+        self.procured_qty: int = 0
         self.buffer_time_area: Dict[Any, float] = {b_id: 0.0 for b_id in self.buffers}
         self.last_buffer_time: float = 0.0
         # Event queue and time
@@ -327,11 +346,19 @@ class LegoLeanEnv:
         # Which stages act as "release stages" (where orders are injected into the system).
         # Even if a release stage has input buffers (e.g., S1 pulls from Warehouse A),
         # we still gate its starts via order tokens to implement CONWIP release control.
-        #self.release_stage_ids = set(self.parameters.get("release_stage_ids", []))
-
-        # 2026-01-01 手动设置起始站点为S1因为发现不知道为什么parameter读不出来，反正没事log反应是对的就好
-        self.release_stage_ids = {"S1"}
+        param_release = self.parameters.get("release_stage_ids")
+        if param_release is None:
+            param_release = ["S1"]
+        if isinstance(param_release, list) and len(param_release) == 0:
+            param_release = ["S1"]
+        self.release_stage_ids = set(param_release)
         self.log.append(f"Release stages detected: {self.release_stage_ids}")
+        if self.push_demand_enabled:
+            sup_ids = self.parameters.get("supplier_stage_ids", ["S1"])
+            self.supplier_stage_ids = set(sup_ids if isinstance(sup_ids, list) else [sup_ids])
+        else:
+            sup_ids = self.parameters.get("supplier_stage_ids", [])
+            self.supplier_stage_ids = set(sup_ids if isinstance(sup_ids, list) else [sup_ids])
 
 
         # Global WIP cap for CONWIP; if None, CONWIP is disabled
@@ -339,6 +366,10 @@ class LegoLeanEnv:
 
         # If True, each finished unit automatically releases one new order (closed-loop CONWIP)
         self.auto_release_conwip = bool(self.parameters.get("auto_release_conwip", False))
+        if self.push_demand_enabled:
+            # 2026-01-09: Disable CONWIP/auto-release when running finite push planning.
+            self.conwip_wip_cap = None
+            self.auto_release_conwip = False
 
         # Kanban caps per buffer (local WIP control). These are "control limits",
         # different from physical capacities (which may be very large like 9999).
@@ -375,6 +406,10 @@ class LegoLeanEnv:
         self.starvation_counts: Dict[Any, int] = {s_id: 0 for s_id in self.stages}
         self.blocking_counts: Dict[Any, int] = {s_id: 0 for s_id in self.stages}
         self.stage_defect_counts: Dict[Any, int] = {s_id: 0 for s_id in self.stages}
+
+        # Push demand plan (finite push based on forecast)
+        if self.push_demand_enabled:
+            self._init_push_demand_plan()
 
     # --------------------------------------------------------------------------
     # Shift logic
@@ -593,12 +628,24 @@ class LegoLeanEnv:
             h = self.holding_costs_per_buffer.get(str(b_id), 0.0)
             inventory_cost += h * area
 
+        planned_release_qty = getattr(self, "planned_release_qty", 0)
+        demand_forecast_total = sum(getattr(self, "demand_forecast", []) or [])
+        demand_realized_total = getattr(self, "realized_demand_total", 0)
+        procured_qty = getattr(self, "procured_qty", 0)
+
         # Revenue (all finished are assumed sold unless demand cap is set)
         sales_units = self.finished if self.demand_qty is None else min(self.finished, self.demand_qty)
         revenue_total = self.unit_price * sales_units
 
         cost_total = self.cost_material + labor_cost + inventory_cost + self.cost_other
         profit = revenue_total - cost_total
+        # 2026-01-09: Charge opportunity cost only for overproduction relative to realized demand.
+        overproduction = max(0, self.finished - demand_realized_total)
+        opportunity_cost = self.margin_per_unit * overproduction
+        profit_after_opportunity = profit - opportunity_cost
+        availability = 1.0
+        if demand_realized_total > 0:
+            availability = min(1.0, self.finished / demand_realized_total)
 
         avg_buffer_levels = {
             str(b_id): (area / sim_time) if sim_time > 0 else 0.0
@@ -616,6 +663,10 @@ class LegoLeanEnv:
             "utilization_per_team": utilization,
             "finished_units": self.finished,
             "started_units": self.started,
+            "planned_release_qty": planned_release_qty,
+            "demand_forecast_total": demand_forecast_total,
+            "demand_realized_total": demand_realized_total,
+            "procured_qty": procured_qty,
             "stage_completed_counts": self.stage_completed_counts,
             "starvation_counts": self.starvation_counts,
             "blocking_counts": self.blocking_counts,
@@ -630,12 +681,54 @@ class LegoLeanEnv:
             "cost_other": self.cost_other,
             "cost_total": cost_total,
             "profit": profit,
+            "opportunity_cost": opportunity_cost,
+            "profit_after_opportunity": profit_after_opportunity,
+            "availability": availability,
             "avg_buffer_levels": avg_buffer_levels,
         }
 
     # --------------------------------------------------------------------------
     # Event handlers
     # --------------------------------------------------------------------------
+
+    def _init_push_demand_plan(self):
+        """Generate forecast/realized demand and (optionally) pre-release planned orders for push mode. 2026-01-09"""
+        horizon = max(1, int(self.push_demand_horizon_weeks))
+        mean = max(0.0, float(self.push_weekly_demand_mean))
+        f_noise = max(0.0, float(self.push_forecast_noise_pct))
+        r_noise = max(0.0, float(self.push_realization_noise_pct))
+        waste = max(0.0, float(self.push_procurement_waste_rate))
+
+        forecast: List[int] = []
+        for _ in range(horizon):
+            noise = random.uniform(-f_noise, f_noise)
+            qty = max(0, int(round(mean * (1.0 + noise))))
+            forecast.append(qty)
+
+        realization: List[int] = []
+        for f in forecast:
+            noise = random.uniform(-r_noise, r_noise)
+            qty = max(0, int(round(f * (1.0 + noise))))
+            realization.append(qty)
+
+        self.demand_forecast = forecast
+        self.demand_realized = realization
+        self.planned_release_qty = int(sum(forecast))
+        self.realized_demand_total = int(sum(realization))
+        self.procured_qty = int(math.ceil(self.planned_release_qty * (1.0 + waste)))
+
+        if self.material_cost_mode == "procure_forecast":
+            self.cost_material = self.unit_material_cost * self.procured_qty
+
+        if self.push_auto_release and self.planned_release_qty > 0:
+            # Pre-release planned quantity (finite push, no closed-loop replenishment)
+            self.enqueue_orders(self.planned_release_qty)
+
+        self.log.append(
+            f"{self._fmt_t()} Push demand plan: forecast={forecast}, "
+            f"realization={realization}, planned_release={self.planned_release_qty}, "
+            f"procured={self.procured_qty}, waste_rate={waste:.3f}."
+        )
 
     def _on_try_start(self, ev: Event):
         """Attempt to start a job at the stage, pulling inputs and engaging the team."""
@@ -677,6 +770,33 @@ class LegoLeanEnv:
 
         bom_mode = bool(stage.required_materials)
 
+        # 2026-01-09: Supplier source shortcut in push mode; push materials directly to outputs without processing.
+        if self.push_demand_enabled and stage.stage_id in self.supplier_stage_ids:
+            all_push_success = True
+            for out_buffer_id, materials in stage.output_buffers.items():
+                ob = self.buffers.get(out_buffer_id)
+                if not ob:
+                    self.log.append(f"{self._fmt_t()} '{stage.name}' error: missing output buffer '{out_buffer_id}'.")
+                    all_push_success = False
+                    continue
+                for item_id, qty in materials.items():
+                    if not ob.push_item(item_id, qty):
+                        self.blocking_counts[stage.stage_id] += 1
+                        self.log.append(f"{self._fmt_t()} '{stage.name}' output blocked: '{out_buffer_id}' full (supplier retry).")
+                        self._schedule_try_start(stage.stage_id, delay=0.5, is_rework=is_rework)
+                        return
+                    self.log.append(f"{self._fmt_t()} Supplier '{stage.name}' delivered {qty}x '{item_id}' → '{out_buffer_id}'.")
+            if all_push_success:
+                self.stage_completed_counts[stage.stage_id] += 1
+                # Wake consumers of pushed buffers
+                for s in self.stages.values():
+                    for b in stage.output_buffers.keys():
+                        if b in s.input_buffers and not s.busy:
+                            self._schedule_try_start(s.stage_id, delay=0.0, is_rework=False)
+                # Try next supplier drop
+                self._schedule_try_start(stage.stage_id, delay=0.0, is_rework=False)
+            return
+
         if stage.required_materials:
             for item_id, required_qty in stage.required_materials.items():
                 pulled = False
@@ -686,7 +806,8 @@ class LegoLeanEnv:
                         pulled_items.append((buf, item_id, required_qty))
                         # Material cost on actual consumption (per item qty)
                         # If unit_material_cost is per "order", you can instead use a per-item rate map in future.
-                        self.cost_material += self.unit_material_cost * required_qty
+                        if self.material_cost_mode == "per_consumption":
+                            self.cost_material += self.unit_material_cost * required_qty
                         pulled = True
                         break
                 if not pulled:
@@ -1143,6 +1264,7 @@ CONFIG: Dict[str, Any] = {
                 "D2": 0.001,
                 "E": 0.0005
             },
+            "margin_per_unit": 5600.0,       # gross margin per finished glider (before costs)
             "demand_qty": None               # optional cap on sellable units (None = unlimited)
         },
         #"release_stage_ids": ["S1"],  # 把 S1 作为入口放行的工序（即使它有 input_buffers 也可以） 2026-01-01 manual setted
@@ -1152,7 +1274,18 @@ CONFIG: Dict[str, Any] = {
             "C3": 4,
             "D1": 4,
             "D2": 4
-        }
+        },
+        # Push demand planning (finite push)
+        "push_demand_enabled": False,
+        "push_auto_release": True,
+        "push_demand_horizon_weeks": 3,
+        "push_weekly_demand_mean": 30,
+        "push_forecast_noise_pct": 0.1,
+        "push_realization_noise_pct": 0.05,
+        "push_procurement_waste_rate": 0.05,
+        # 2026-01-09: Supplier stage IDs used for push-mode direct supply.
+        "supplier_stage_ids": ["S1"],
+        "material_cost_mode": "procure_forecast",
     },
 
     # ----------------------------------------------------------------------------
