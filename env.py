@@ -214,6 +214,7 @@ class LegoLeanEnv:
         self.time_unit = time_unit
         # 2026-01-01 把tracelog初始化弄上来一点，这样在原本位置上面的日志就可以正常输出了
         # Trace log
+        self.t: float = 0.0
         self.log: List[str] = []
         if seed is not None:
             random.seed(seed)
@@ -281,9 +282,30 @@ class LegoLeanEnv:
         cost_cfg = self.parameters.get("cost", {})
         self.unit_price = float(cost_cfg.get("unit_price", 0.0))
         self.unit_material_cost = float(cost_cfg.get("unit_material_cost", 0.0))
-        # 2026-01-09: Allow procurement-based costing and explicit margin tracking for push mode economics.
+
+        # Material cost accounting mode
         self.material_cost_mode = (self.parameters.get("material_cost_mode") or "procure_forecast")
-        self.margin_per_unit = float(cost_cfg.get("margin_per_unit", max(0.0, self.unit_price - self.unit_material_cost)))
+
+        # ----------------------------------------------------------------------
+        # Margin definition (unit contribution margin for opportunity cost)
+        # ----------------------------------------------------------------------
+        # We define margin as a per-unit contribution margin used to monetize unmet demand:
+        #   margin = unit_price - unit_material_cost
+        # Labor and inventory holding are modeled separately in cost_total, so they MUST NOT be embedded here,
+        # otherwise you'll double count them when computing profit.
+        margin_cfg = cost_cfg.get("margin_per_unit", None)
+        if margin_cfg is None:
+            self.margin_per_unit = max(0.0, self.unit_price - self.unit_material_cost)
+            self.log.append(
+                f"{self._fmt_t()} Margin per unit defaulted to unit_price - unit_material_cost "
+                f"= {self.unit_price:.4f} - {self.unit_material_cost:.4f} = {self.margin_per_unit:.4f}."
+            )
+        else:
+            self.margin_per_unit = float(margin_cfg)
+            self.log.append(
+                f"{self._fmt_t()} Margin per unit overridden by config: {self.margin_per_unit:.4f}."
+            )
+
         self.labor_costs_per_team = {
             str(k): float(v) for k, v in (cost_cfg.get("labor_costs_per_team_sec") or {}).items()
         }
@@ -479,7 +501,7 @@ class LegoLeanEnv:
             return
 
         # Enforce CONWIP WIP cap (if enabled)
-        cap = self.parameters.get("conwip_wip_cap", None)
+        cap = self.conwip_wip_cap
         if cap is not None:
             allowed = max(0, int(cap) - int(self.current_wip))
             qty = min(qty, allowed)
@@ -632,25 +654,37 @@ class LegoLeanEnv:
         demand_forecast_total = sum(getattr(self, "demand_forecast", []) or [])
         demand_realized_total = getattr(self, "realized_demand_total", 0)
         procured_qty = getattr(self, "procured_qty", 0)
+        # ----------------------------
+        # Demand → Sales → Opportunity cost (UNMET demand only)
+        # ----------------------------
+        # demand_total priority:
+        # 1) push plan realized demand (if available)
+        # 2) external demand cap demand_qty (for pull-mode experiments)
+        # 3) None/0 => no unmet-demand penalty
+        demand_total = 0
+        if int(demand_realized_total) > 0:
+            demand_total = int(demand_realized_total)
+        elif self.demand_qty is not None:
+            demand_total = int(self.demand_qty)
 
-        # Revenue (all finished are assumed sold unless demand cap is set)
-        sales_units = self.finished if self.demand_qty is None else min(self.finished, self.demand_qty)
-        revenue_total = self.unit_price * sales_units
+        # Sales units: cannot exceed demand_total if demand_total is defined
+        if demand_total > 0:
+            sales_units = min(int(self.finished), int(demand_total))
+        else:
+            sales_units = int(self.finished)
+
+        # Revenue based on actual sales (avoid counting overproduction as sold)
+        revenue_total = float(self.unit_price) * float(sales_units)
 
         cost_total = self.cost_material + labor_cost + inventory_cost + self.cost_other
         profit = revenue_total - cost_total
-        # 2026-01-09: Charge opportunity cost only for overproduction relative to realized demand.
-        # 2026-01-10: opportunity cost 弄反了
-       #这个应该在inventory cost and material cost 算 overproduction = max(0, self.finished - demand_realized_total)
-        #opportunity_cost = self.margin_per_unit * overproduction
-        #profit_after_opportunity = profit - opportunity_cost
-        # Opportunity cost KPI (unmet demand): unrealized contribution margin
-        unmet_demand = max(0, int(demand_realized_total) - int(sales_units))
-        opportunity_cost = self.margin_per_unit * unmet_demand
 
-        availability = 1.0
-        if demand_realized_total > 0:
-            availability = min(1.0, self.finished / demand_realized_total)
+        # Opportunity cost (unmet demand only): m * (D - Q)^+
+        unmet_demand = max(0, int(demand_total) - int(sales_units)) if demand_total > 0 else 0
+        opportunity_cost = float(self.margin_per_unit) * float(unmet_demand)
+
+        # Availability / service (demand-based)
+        availability = (float(sales_units) / float(demand_total)) if demand_total > 0 else 1.0
 
         avg_buffer_levels = {
             str(b_id): (area / sim_time) if sim_time > 0 else 0.0
@@ -1282,8 +1316,8 @@ CONFIG: Dict[str, Any] = {
             "D2": 4
         },
         # Push demand planning (finite push)
-        "push_demand_enabled": False,
-        "push_auto_release": True,
+        "push_demand_enabled": True,
+        "push_auto_release": False,
         "push_demand_horizon_weeks": 3,
         "push_weekly_demand_mean": 30,
         "push_forecast_noise_pct": 0.1,
