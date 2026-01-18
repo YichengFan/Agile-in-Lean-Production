@@ -65,21 +65,26 @@ with st.sidebar:
                               value=int(cfg["parameters"].get("kanban_caps", {}).get("D2", 4)), step=1)
     else:
         st.markdown("### Push Planning (Demand-based)")
+        st.caption("💡 **How demand works**: Forecast is generated, then realization noise is applied to create actual demand. "
+                   "If realized demand > planned production, you'll have unmet demand (push mode limitation).")
         horizon_weeks = st.number_input(
             "Demand horizon (weeks)",
             min_value=1, value=int(cfg["parameters"].get("push_demand_horizon_weeks", 3)), step=1
         )
         weekly_mean = st.number_input(
             "Forecast weekly demand (units)",
-            min_value=0, value=int(cfg["parameters"].get("push_weekly_demand_mean", 30)), step=1
+            min_value=0, value=int(cfg["parameters"].get("push_weekly_demand_mean", 30)), step=1,
+            help="Total weekly demand (will be allocated across models based on probability distribution)"
         )
         forecast_noise_pct = st.slider(
             "Forecast noise (±%)",
-            min_value=0, max_value=50, value=int(float(cfg["parameters"].get("push_forecast_noise_pct", 0.1)) * 100)
+            min_value=0, max_value=50, value=int(float(cfg["parameters"].get("push_forecast_noise_pct", 0.1)) * 100),
+            help="Noise applied to forecast generation"
         )
         real_noise_pct = st.slider(
             "Realization noise (±%)",
-            min_value=0, max_value=50, value=int(float(cfg["parameters"].get("push_realization_noise_pct", 0.05)) * 100)
+            min_value=0, max_value=50, value=int(float(cfg["parameters"].get("push_realization_noise_pct", 0.05)) * 100),
+            help="Noise applied to final demand realization. Higher values create more unmet demand scenarios."
         )
         waste_pct = st.slider(
             "Procurement waste/safety stock (%)",
@@ -109,7 +114,7 @@ with st.sidebar:
         cfg["parameters"]["kanban_caps"] = {}
         cfg["parameters"].setdefault("cost", {})
         cfg["parameters"]["cost"]["margin_per_unit"] = float(margin_per_unit)
-    sim_time = st.number_input("Simulation time (seconds)", min_value=1, value=3600, step=60)
+    sim_time = st.number_input("Simulation time (minutes)", min_value=1, value=30240, step=60, help="3 weeks = 30240 minutes (3 * 7 * 24 * 60)")
 
     use_random_seed = st.checkbox("Use random seed", value=False)
     seed = None
@@ -117,11 +122,54 @@ with st.sidebar:
     if use_random_seed:
         seed = st.number_input("Random seed", min_value=0, value=42, step=1)
 
-    # Pull-mode release: initial injection only (then closed-loop CONWIP can replenish)
-    # 2026-01-09: Only show/use initial release when Pull is enabled.
-    initial_release = 0
-    if enable_pull:
-        initial_release = st.number_input("Initial release qty (CONWIP)", min_value=0, value=12, step=1)
+    # Multi-model order release configuration
+    st.markdown("### Order Release Configuration")
+    
+    # Model type selection with quantities
+    st.markdown("**Specify quantity for each model:**")
+    model_definitions = cfg.get("models", {})
+    model_quantities = {}
+    
+    if model_definitions:
+        # Create columns for better layout (2 models per row)
+        model_ids = sorted(list(model_definitions.keys()))
+        num_cols = 2
+        num_rows = (len(model_ids) + num_cols - 1) // num_cols
+        
+        for row in range(num_rows):
+            cols = st.columns(num_cols)
+            for col_idx in range(num_cols):
+                model_idx = row * num_cols + col_idx
+                if model_idx < len(model_ids):
+                    model_id = model_ids[model_idx]
+                    model_name = model_definitions[model_id].get("name", model_id)
+                    with cols[col_idx]:
+                        qty = st.number_input(
+                            f"{model_name} ({model_id})",
+                            min_value=0,
+                            value=0,
+                            step=1,
+                            key=f"model_qty_{model_id}",
+                            help=f"Quantity of {model_name} to produce"
+                        )
+                        if qty > 0:
+                            model_quantities[model_id] = qty
+        
+        total_orders = sum(model_quantities.values())
+        if total_orders > 0:
+            st.success(f"**Total orders to release: {total_orders}**")
+            # Show breakdown
+            breakdown = ", ".join([f"{qty}x {model_definitions[mid].get('name', mid)}" 
+                                  for mid, qty in sorted(model_quantities.items())])
+            st.caption(f"Breakdown: {breakdown}")
+        else:
+            st.warning("⚠️ No orders specified. Please set quantity for at least one model.")
+    else:
+        st.info("No model definitions found in config. Using default materials.")
+        # Fallback: single quantity input for backward compatibility
+        initial_release = st.number_input("Initial release qty", min_value=0, value=12, step=1)
+        if initial_release > 0:
+            model_quantities["default"] = initial_release
 
     deterministic = st.checkbox("Deterministic processing (override times; disable disruptions)", value=False)
     show_logs_n = st.number_input("Show last N logs", min_value=0, value=30, step=5)
@@ -131,20 +179,20 @@ st.subheader("Global Parameters")
 c1, c2 = st.columns(2)
 with c1:
     takt = st.number_input(
-        "Target takt (sec)",
+        "Target takt (min)",
         min_value=0.0,
-        value=float(cfg["parameters"].get("target_takt_sec", 10.0)),
+        value=float(cfg["parameters"].get("target_takt_min", cfg["parameters"].get("target_takt_sec", 10.0) / 60.0)),
         step=0.5
     )
-    cfg["parameters"]["target_takt_sec"] = float(takt)
+    cfg["parameters"]["target_takt_min"] = float(takt)
 with c2:
     sample_dt = st.number_input(
-        "Timeline sample Δt (sec)",
+        "Timeline sample Δt (min)",
         min_value=0.5,
-        value=float(cfg["parameters"].get("timeline_sample_dt_sec", 5.0)),
+        value=float(cfg["parameters"].get("timeline_sample_dt_min", cfg["parameters"].get("timeline_sample_dt_sec", 5.0) / 60.0)),
         step=0.5
     )
-    cfg["parameters"]["timeline_sample_dt_sec"] = float(sample_dt)
+    cfg["parameters"]["timeline_sample_dt_min"] = float(sample_dt)
 
 
 if enable_pull:
@@ -216,23 +264,34 @@ if enable_pull:
 
 st.markdown("---")
 st.subheader("Shift Window")
-d1, d2 = st.columns(2)
-with d1:
-    shift_start_min = st.number_input(
-        "Shift start (minutes in day)",
-        min_value=0,
-        max_value=24 * 60,
-        value=int(cfg["shift_schedule"][0]["start_minute"])
-    )
-with d2:
-    shift_end_min = st.number_input(
-        "Shift end (minutes in day)",
-        min_value=0,
-        max_value=24 * 60,
-        value=int(cfg["shift_schedule"][0]["end_minute"])
-    )
-cfg["shift_schedule"][0]["start_minute"] = int(shift_start_min)
-cfg["shift_schedule"][0]["end_minute"] = int(shift_end_min)
+# Shift schedule disabled for continuous 3-week production
+# If shift_schedule is empty or not present, initialize with empty list (shifts disabled)
+if not cfg.get("shift_schedule"):
+    cfg["shift_schedule"] = []
+
+# Shift configuration UI (disabled - shifts not used in current setup)
+if len(cfg.get("shift_schedule", [])) > 0:
+    d1, d2 = st.columns(2)
+    with d1:
+        shift_start_min = st.number_input(
+            "Shift start (minutes in day)",
+            min_value=0,
+            max_value=24 * 60,
+            value=int(cfg["shift_schedule"][0].get("start_minute", 480))
+        )
+    with d2:
+        shift_end_min = st.number_input(
+            "Shift end (minutes in day)",
+            min_value=0,
+            max_value=24 * 60,
+            value=int(cfg["shift_schedule"][0].get("end_minute", 960))
+        )
+    cfg["shift_schedule"][0]["start_minute"] = int(shift_start_min)
+    cfg["shift_schedule"][0]["end_minute"] = int(shift_end_min)
+else:
+    # Shifts disabled - production runs continuously (24/7)
+    st.info("ℹ️ **Shifts disabled** - Production runs continuously (24/7) for 3-week simulation.")
+    cfg["shift_schedule"] = []
 
 
 st.markdown("---")
@@ -245,13 +304,13 @@ def stage_controls(label: str, sid: str):
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         base = st.number_input(
-            f"{sid} base_time/worker (sec)",
+            f"{sid} base_time/worker (min)",
             min_value=0.0,
-            value=float(s.get("base_process_time_sec", 1.0)),
+            value=float(s.get("base_process_time_min", s.get("base_process_time_sec", 1.0) / 60.0)),
             step=0.5,
             key=f"{sid}_base"
         )
-        s["base_process_time_sec"] = float(base)
+        s["base_process_time_min"] = float(base)
     with c2:
         workers = st.number_input(
             f"{sid} workers",
@@ -299,13 +358,13 @@ def stage_controls(label: str, sid: str):
         s["time_distribution"]["p3"] = float(p3)
     with e2:
         trans = st.number_input(
-            f"{sid} transport (sec)",
+            f"{sid} transport (min)",
             min_value=0.0,
-            value=float(s.get("transport_time_sec", 0.0)),
+            value=float(s.get("transport_time_min", s.get("transport_time_sec", 0.0) / 60.0)),
             step=0.1,
             key=f"{sid}_tt"
         )
-        s["transport_time_sec"] = float(trans)
+        s["transport_time_min"] = float(trans)
     with e3:
         defect = st.number_input(
             f"{sid} defect rate",
@@ -322,49 +381,33 @@ with exp:
     stage_controls("Set Sorting", "S2")
 
     # --- S2 per-output transport times ---
-    st.markdown("**S2 per-output transport (sec)**")
+    st.markdown("**S2 per-output transport (min)**")
     s2 = stage_by_id(cfg, "S2")
-    if "transport_time_to_outputs_sec" not in s2 or s2.get("transport_time_to_outputs_sec") is None:
-        base = float(s2.get("transport_time_sec", 0.0))
-        s2["transport_time_to_outputs_sec"] = {"C1": base, "C2": base, "C3": base}
+    if "transport_time_to_outputs_min" not in s2 or s2.get("transport_time_to_outputs_min") is None:
+        # Support both old and new field names
+        old_dict = s2.get("transport_time_to_outputs_sec", {})
+        base = float(s2.get("transport_time_min", s2.get("transport_time_sec", 0.0) / 60.0))
+        if old_dict:
+            s2["transport_time_to_outputs_min"] = {k: float(v) / 60.0 if isinstance(v, (int, float)) else v for k, v in old_dict.items()}
+        else:
+            s2["transport_time_to_outputs_min"] = {"C1": base, "C2": base, "C3": base}
 
     ttc1, ttc2, ttc3 = st.columns(3)
     with ttc1:
-        s2_c1 = st.number_input("S2 → C1", min_value=0.0, value=float(s2["transport_time_to_outputs_sec"].get("C1", 0.0)), step=0.1, key="S2_to_C1")
+        s2_c1 = st.number_input("S2 → C1", min_value=0.0, value=float(s2["transport_time_to_outputs_min"].get("C1", 0.0)), step=0.1, key="S2_to_C1")
     with ttc2:
-        s2_c2 = st.number_input("S2 → C2", min_value=0.0, value=float(s2["transport_time_to_outputs_sec"].get("C2", 0.0)), step=0.1, key="S2_to_C2")
+        s2_c2 = st.number_input("S2 → C2", min_value=0.0, value=float(s2["transport_time_to_outputs_min"].get("C2", 0.0)), step=0.1, key="S2_to_C2")
     with ttc3:
-        s2_c3 = st.number_input("S2 → C3", min_value=0.0, value=float(s2["transport_time_to_outputs_sec"].get("C3", 0.0)), step=0.1, key="S2_to_C3")
+        s2_c3 = st.number_input("S2 → C3", min_value=0.0, value=float(s2["transport_time_to_outputs_min"].get("C3", 0.0)), step=0.1, key="S2_to_C3")
 
-    s2["transport_time_to_outputs_sec"]["C1"] = float(s2_c1)
-    s2["transport_time_to_outputs_sec"]["C2"] = float(s2_c2)
-    s2["transport_time_to_outputs_sec"]["C3"] = float(s2_c3)
+    s2["transport_time_to_outputs_min"] = {"C1": float(s2_c1), "C2": float(s2_c2), "C3": float(s2_c3)}
 
     stage_controls("Axis Assembly", "S3")
     stage_controls("Chassis Assembly", "S4")
     stage_controls("Final Assembly", "S5")
 
 
-st.markdown("---")
-st.subheader("Random Disruptions")
-c1, c2 = st.columns(2)
-with c1:
-    miss_p = st.number_input(
-        "missing_brick_prob",
-        min_value=0.0,
-        max_value=1.0,
-        value=float(cfg["random_events"].get("missing_brick_prob", 0.1)),
-        step=0.01
-    )
-    cfg["random_events"]["missing_brick_prob"] = float(miss_p)
-with c2:
-    miss_pen = st.number_input(
-        "missing_brick_penalty_sec",
-        min_value=0.0,
-        value=float(cfg["random_events"].get("missing_brick_penalty_sec", 2.0)),
-        step=0.5
-    )
-    cfg["random_events"]["missing_brick_penalty_sec"] = float(miss_pen)
+
 
 
 st.markdown("---")
@@ -413,11 +456,45 @@ if st.button("Run Simulation"):
         cfg["parameters"]["release_stage_ids"] = cfg["parameters"].get("release_stage_ids", ["S1"])
 
     # Build env
-    env = LegoLeanEnv(cfg, time_unit="sec", seed=(None if seed is None else int(seed)))
+    env = LegoLeanEnv(cfg, time_unit="min", seed=(None if seed is None else int(seed)))
 
-    # Pull-mode: initial release only (then closed-loop CONWIP replenishes if enabled)
-    if enable_pull and int(initial_release) > 0:
-        env.enqueue_orders(qty=int(initial_release))
+    # Order release strategy differs by mode:
+    # - Pull mode: Manually release orders based on user input (model_quantities)
+    # - Push mode: Orders are automatically released based on demand forecast (via _schedule_demand_releases)
+    if enable_pull:
+        # Pull-mode: initial release only (then closed-loop CONWIP replenishes if enabled)
+        # Release orders for each model type (FIFO queueing)
+        total_released = 0
+        release_order = []  # Track order for logging
+        
+        # Release orders in the order they appear in model_quantities
+        # This ensures FIFO: first model enqueued will be processed first
+        for model_id, qty in model_quantities.items():
+            if qty > 0:
+                env.enqueue_orders(qty=int(qty), model_id=model_id)
+                total_released += int(qty)
+                model_name = cfg.get("models", {}).get(model_id, {}).get("name", model_id)
+                release_order.append(f"{qty}x {model_name}")
+        
+        if total_released == 0:
+            st.warning("⚠️ No orders were released. Please specify quantities for at least one model.")
+            st.stop()
+        else:
+            st.info(f"✅ Released {total_released} order(s) in FIFO order: {', '.join(release_order)}")
+    else:
+        # Push-mode: Forecast → Queue → Produce → Compare
+        # 1. Forecast 3 weeks demand (generated during env init)
+        # 2. Queue all orders immediately based on forecast
+        # 3. Produce everything until finished
+        # 4. Compare actual demand vs forecast in KPIs
+        if env.push_auto_release:
+            planned_total = sum(env.planned_release_qty.values()) if isinstance(env.planned_release_qty, dict) else 0
+            if planned_total > 0:
+                st.info(f"📊 Push mode: {planned_total} orders queued from forecast. Production will run until completion.")
+            else:
+                st.warning("⚠️ Push mode enabled but no orders scheduled. Check forecast parameters.")
+        else:
+            st.info("ℹ️ Push mode: Auto-release is disabled. Orders will be released manually if configured.")
 
     #2026-01-01 存疑，如果是push的话enqueue激活就够了，这样是否会反复激活S1？
     # Kick off: try starting all stages once
@@ -431,6 +508,52 @@ if st.button("Run Simulation"):
 
     kpis = env.get_kpis()
     st.subheader("KPIs")
+    
+    # Show per-model forecast information if available (push mode)
+    if not enable_pull and kpis.get("demand_forecast_by_model"):
+        st.markdown("### Demand Forecast & Realization (Per-Model)")
+        forecast_by_model = kpis.get("demand_forecast_by_model", {})
+        realized_by_model = kpis.get("demand_realized_by_model", {})
+        planned_by_model = kpis.get("planned_release_qty_by_model", {})
+        
+        if forecast_by_model:
+            forecast_data = []
+            for model_id in sorted(forecast_by_model.keys()):
+                model_name = cfg.get("models", {}).get(model_id, {}).get("name", model_id)
+                forecast_total = sum(forecast_by_model[model_id]) if isinstance(forecast_by_model[model_id], list) else forecast_by_model[model_id]
+                realized = realized_by_model.get(model_id, 0)
+                planned = planned_by_model.get(model_id, 0)
+                finished = kpis.get("finished_units", 0)  # Total finished, would need per-model tracking for exact
+                
+                forecast_data.append({
+                    "Model": f"{model_name} ({model_id})",
+                    "Forecast": forecast_total,
+                    "Realized Demand": realized,
+                    "Planned Release": planned,
+                    "Difference": realized - forecast_total,
+                    "Status": "⚠️ Unmet" if realized > planned else "✅ Met" if realized <= planned else "✅"
+                })
+            
+            if forecast_data:
+                forecast_df = pd.DataFrame(forecast_data)
+                st.dataframe(forecast_df, use_container_width=True)
+                
+                # Summary
+                total_forecast = kpis.get("demand_forecast_total", 0)
+                total_realized = kpis.get("demand_realized_total", 0)
+                total_planned = kpis.get("planned_release_qty", 0)
+                unmet = max(0, total_realized - kpis.get("finished_units", 0))
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Forecast", total_forecast)
+                with col2:
+                    st.metric("Total Realized Demand", total_realized)
+                with col3:
+                    st.metric("Total Planned Release", total_planned)
+                with col4:
+                    st.metric("Unmet Demand", unmet, delta=f"{(unmet/total_realized*100) if total_realized > 0 else 0:.1f}%")
+    
     st.json(kpis)
 
     # Pull-control diagnostics (if present in env)
