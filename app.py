@@ -65,6 +65,7 @@ with st.sidebar:
                               value=int(cfg["parameters"].get("kanban_caps", {}).get("D2", 4)), step=1)
     else:
         st.markdown("### Push Planning (Demand-based)")
+        horizon_weeks = st.number_input(
             "Demand horizon (weeks)",
             min_value=1, value=int(cfg["parameters"].get("push_demand_horizon_weeks", 3)), step=1
         )
