@@ -110,7 +110,18 @@ with st.sidebar:
         cfg["parameters"]["kanban_caps"] = {}
         cfg["parameters"].setdefault("cost", {})
         cfg["parameters"]["cost"]["margin_per_unit"] = float(margin_per_unit)
-    sim_time = st.number_input("Simulation time (minutes)", min_value=1, value=30240, step=60, help="3 weeks = 30240 minutes (3 * 7 * 24 * 60)")
+# Calculate simulation time based on demand horizon in push mode
+    if cfg["parameters"].get("push_demand_enabled", False):
+        sim_time = int(horizon_weeks) * 5 * 8 * 60  # weeks * 5 days/week * 8 hours/day * 60 min/hour
+        st.metric("Simulation time (minutes)",
+                 f"{sim_time:,}",
+                 help=f"Automatically calculated from demand horizon: {int(horizon_weeks)} weeks × 5 days/week × 8 hours/day × 60 min/hour")
+    else:
+        sim_time = st.number_input("Simulation time (minutes)", min_value=1, value=7200, step=60,
+                                  help="Simulation time (minutes) - adjustable in pull mode")
+
+
+
 
     use_random_seed = st.checkbox("Use random seed", value=False)
     seed = None

@@ -321,7 +321,6 @@ class LegoLeanEnv:
         self.cost_labor: float = 0.0
         self.cost_inventory: float = 0.0
         self.cost_other: float = 0.0
-        # 2026-01-09: Push demand planning knobs (finite push based on forecast/realization).
         self.push_demand_enabled: bool = bool(self.parameters.get("push_demand_enabled", False))
         # In push mode, auto-release is always enabled (forecast automatically triggers production)
         self.push_auto_release: bool = True if self.push_demand_enabled else bool(self.parameters.get("push_auto_release", False))
@@ -330,7 +329,6 @@ class LegoLeanEnv:
         self.push_forecast_noise_pct: float = float(self.parameters.get("push_forecast_noise_pct", 0.1))
         self.push_realization_noise_pct: float = float(self.parameters.get("push_realization_noise_pct", 0.05))
         self.push_procurement_waste_rate: float = float(self.parameters.get("push_procurement_waste_rate", 0.05))
-        # 2026-01-09: Stage IDs that act as supplier drops (skip processing, push parts to buffers in push mode).
         self.supplier_stage_ids: set = set()
         # Demand bookkeeping (per-model)
         self.demand_forecast: Dict[str, List[int]] = {}  # model_id -> list of weekly forecasts
@@ -398,7 +396,6 @@ class LegoLeanEnv:
         # If True, each finished unit automatically releases one new order (closed-loop CONWIP)
         self.auto_release_conwip = bool(self.parameters.get("auto_release_conwip", False))
         if self.push_demand_enabled:
-            # 2026-01-09: Disable CONWIP/auto-release when running finite push planning.
             self.conwip_wip_cap = None
             self.auto_release_conwip = False
 
@@ -982,7 +979,6 @@ class LegoLeanEnv:
 
         bom_mode = bool(required_materials)
 
-        # 2026-01-09: Supplier source shortcut in push mode; push materials directly to outputs without processing.
         if self.push_demand_enabled and stage.stage_id in self.supplier_stage_ids:
             all_push_success = True
             for out_buffer_id, materials in output_buffers.items():
@@ -1694,11 +1690,10 @@ CONFIG: Dict[str, Any] = {
         "push_demand_enabled": True,
         "push_auto_release": False,
         "push_demand_horizon_weeks": 3,
-        "push_weekly_demand_mean": 30,
+        "push_weekly_demand_mean": 25,
         "push_forecast_noise_pct": 0.1,
         "push_realization_noise_pct": 0.05,
         "push_procurement_waste_rate": 0.05,
-        # 2026-01-09: Supplier stage IDs used for push-mode direct supply.
         "supplier_stage_ids": [],  # S1 should process materials normally (pull from A, output to B), not act as supplier
         "material_cost_mode": "procure_forecast",
     },
