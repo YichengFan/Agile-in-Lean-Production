@@ -305,7 +305,7 @@ class LegoLeanEnv:
             )
 
         self.labor_costs_per_team = {
-            str(k): float(v) for k, v in (cost_cfg.get("labor_costs_per_team_sec") or {}).items()
+            str(k): float(v) for k, v in (cost_cfg.get("labor_costs_per_team_min") or {}).items()
         }
         self.holding_costs_per_buffer = {
             str(k): float(v) for k, v in (cost_cfg.get("holding_costs_per_buffer_sec") or {}).items()
@@ -668,7 +668,7 @@ class LegoLeanEnv:
                 team.start_busy(self.t)
             utilization[team_id] = team.busy_time / sim_time
             rate = self.labor_costs_per_team.get(str(team_id), 0.0)
-            labor_cost += rate * team.size * team.busy_time
+            labor_cost += rate * team.size * sim_time
 
         # Inventory holding cost (area under inventory curves × holding rate)
         # Exclude buffer A from inventory cost calculation
@@ -1660,12 +1660,12 @@ CONFIG: Dict[str, Any] = {
         "cost": {
             "unit_price": 10000.0,           # revenue per finished glider
             "unit_material_cost": 4400.0,    # material cost per released order (can be adjusted to per-BOM)
-            "labor_costs_per_team_sec": {    # cost rate per team per second (multiplied by team size)
-                "T1": 0.010,
-                "T2": 0.010,
-                "T3": 0.010,
-                "T4": 0.010,
-                "T5": 0.012
+            "labor_costs_per_team_min": {    # cost rate per team per second (multiplied by team size)
+                "T1": 0.30,
+                "T2": 0.30,
+                "T3": 0.30,
+                "T4": 0.30,
+                "T5": 0.30
             },
             "holding_costs_per_buffer_sec": { # cost rate per unit inventory per second
                 "A": 0.0005, "B": 0.0005,
