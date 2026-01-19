@@ -27,7 +27,6 @@ from typing import Any, Dict, List, Optional
 import heapq
 import random
 import math
-import time
 from collections import deque  # Used to track order release times for lead-time calculation
 
 
@@ -35,11 +34,6 @@ from collections import deque  # Used to track order release times for lead-time
 # ==============================================================================
 # Utility helpers
 # ==============================================================================
-
-def wall_ms() -> int:
-    """Wall-clock milliseconds (only for profiling/logging, not simulation time)."""
-    return int(time.time() * 1000)
-
 
 def sample_time(dist: Dict[str, Any], base: float) -> float:
     """
@@ -231,13 +225,14 @@ class LegoLeanEnv:
         self.buffers: Dict[Any, Buffer] = {}
         for b in self.cfg.get("buffers", []):
             b_id = b.get("buffer_id") or b.get("name")
+            initial_stock = b.get("initial_stock") or {}
             self.buffers[b_id] = Buffer(
                 buffer_id=b_id,
                 name=b.get("name") or str(b_id),
                 capacity=b.get("capacity"),
-                initial_stock=b.get("initial_stock") or {}
+                initial_stock=initial_stock
             )
-
+        
         # Build teams
         self.teams: Dict[Any, Team] = {}
         for t in self.cfg.get("teams", []):
@@ -258,10 +253,11 @@ class LegoLeanEnv:
             if isinstance(in_bufs, str) and in_bufs.strip():
                 in_bufs = [in_bufs]
             in_bufs = in_bufs or []
+            stage_team_id = s.get("team_id")
             self.stages[s_id] = Stage(
                 stage_id=s_id,
                 name=s.get("name") or str(s_id),
-                team_id=s.get("team_id"),
+                team_id=stage_team_id,
                 input_buffers=in_bufs,
                 required_materials=s.get("required_materials") or {},
                 required_materials_by_model=s.get("required_materials_by_model") or {},
@@ -276,12 +272,8 @@ class LegoLeanEnv:
                 workers=int(s.get("workers") or 1)
             )
 
-        # Shifts (optional)
-        self.shifts = self.cfg.get("shift_schedule", [])
-
-        # Global parameters and random disruption controls
+        # Global parameters
         self.parameters = self.cfg.get("parameters", {})
-        self.random_events = self.cfg.get("random_events", {})
         self.finished_buffers = list(self.parameters.get("finished_buffer_ids", ["E"]))
         self.trace_assembly: bool = bool(self.parameters.get("trace_assembly", False))
         # Cost & revenue parameters (optional)
@@ -331,7 +323,8 @@ class LegoLeanEnv:
         self.cost_other: float = 0.0
         # 2026-01-09: Push demand planning knobs (finite push based on forecast/realization).
         self.push_demand_enabled: bool = bool(self.parameters.get("push_demand_enabled", False))
-        self.push_auto_release: bool = bool(self.parameters.get("push_auto_release", True))
+        # In push mode, auto-release is always enabled (forecast automatically triggers production)
+        self.push_auto_release: bool = True if self.push_demand_enabled else bool(self.parameters.get("push_auto_release", False))
         self.push_demand_horizon_weeks: int = int(self.parameters.get("push_demand_horizon_weeks", 3) or 3)
         self.push_weekly_demand_mean: float = float(self.parameters.get("push_weekly_demand_mean", 30.0))
         self.push_forecast_noise_pct: float = float(self.parameters.get("push_forecast_noise_pct", 0.1))
@@ -374,6 +367,7 @@ class LegoLeanEnv:
 
         # KPIs
         self.finished: int = 0
+        self.finished_goods_by_model: Dict[str, int] = {}  # Track finished units per model
         self.started: int = 0
         self.lead_times: List[float] = []
         self.wip_time_area: float = 0.0
@@ -393,12 +387,9 @@ class LegoLeanEnv:
             param_release = ["S1"]
         self.release_stage_ids = set(param_release)
         self.log.append(f"Release stages detected: {self.release_stage_ids}")
-        if self.push_demand_enabled:
-            sup_ids = self.parameters.get("supplier_stage_ids", ["S1"])
-            self.supplier_stage_ids = set(sup_ids if isinstance(sup_ids, list) else [sup_ids])
-        else:
-            sup_ids = self.parameters.get("supplier_stage_ids", [])
-            self.supplier_stage_ids = set(sup_ids if isinstance(sup_ids, list) else [sup_ids])
+        # Supplier stages should be empty by default (S1 processes materials normally)
+        sup_ids = self.parameters.get("supplier_stage_ids", [])
+        self.supplier_stage_ids = set(sup_ids if isinstance(sup_ids, list) else [sup_ids])
 
 
         # Global WIP cap for CONWIP; if None, CONWIP is disabled
@@ -456,32 +447,6 @@ class LegoLeanEnv:
     # Shift logic
     # --------------------------------------------------------------------------
 
-    def _is_in_shift(self, t: float) -> bool:
-        """Return True if time t (minutes) falls inside any active shift window."""
-        if not self.shifts:
-            return True
-        minute_in_day = t % 1440.0  # 1440 minutes = 24 hours
-        for sh in self.shifts:
-            start_min = float(sh.get("start_minute", 0))
-            end_min = float(sh.get("end_minute", 1440))
-            if start_min <= minute_in_day <= end_min:
-                return True
-        return False
-
-    def _advance_to_next_shift_start(self, t: float) -> float:
-        """Return the next time (minutes) when a shift starts after t."""
-        if not self.shifts:
-            return t
-        minute_in_day = t % 1440.0  # 1440 minutes = 24 hours
-        starts = sorted([float(s.get("start_minute", 0)) for s in self.shifts])
-        for st in starts:
-            if st > minute_in_day:
-                delta_min = st - minute_in_day
-                return t + delta_min
-        # Wrap to next day's first shift
-        delta_min = (1440.0 - minute_in_day) + starts[0]
-        return t + delta_min
-
     # --------------------------------------------------------------------------
     # Event queue helpers
     # --------------------------------------------------------------------------
@@ -504,52 +469,6 @@ class LegoLeanEnv:
             return
         self._try_start_scheduled.add(key)
         self._push_event(self.t + float(delay), "try_start", {"stage_id": stage_id, "is_rework": bool(is_rework)})
-
-    def _schedule_demand_releases(self):
-        """
-        Schedule demand releases over 3 weeks of working time.
-        Working time: 8 hours/day × 5 days/week × 3 weeks = 120 hours = 7200 minutes.
-        Distributes releases evenly across working days.
-        """
-        if not self.planned_release_qty:
-            return
-
-        # Working time parameters
-        hours_per_day = 8
-        days_per_week = 5
-        weeks = self.push_demand_horizon_weeks
-        total_working_minutes = hours_per_day * 60 * days_per_week * weeks  # 7200 minutes for 3 weeks
-        total_working_days = days_per_week * weeks  # 15 days for 3 weeks
-
-        # Calculate releases per day for each model
-        for model_id, total_qty in self.planned_release_qty.items():
-            if total_qty <= 0:
-                continue
-
-            # Distribute evenly across working days
-            qty_per_day = max(1, int(total_qty / total_working_days))
-            remaining_qty = total_qty
-
-            for day in range(total_working_days):
-                # Calculate release time: start of each working day
-                # Assuming work starts at minute 0 of each day (can be adjusted with shift schedule)
-                release_time = day * 1440.0  # Each day = 1440 minutes
-                
-                # Release quantity for this day
-                day_qty = min(qty_per_day, remaining_qty) if day < total_working_days - 1 else remaining_qty
-                if day_qty > 0:
-                    self._push_event(release_time, "release_demand", {
-                        "model_id": model_id,
-                        "qty": day_qty
-                    })
-                    remaining_qty -= day_qty
-                    if remaining_qty <= 0:
-                        break
-
-        self.log.append(
-            f"{self._fmt_t()} Scheduled demand releases over {total_working_days} working days "
-            f"({total_working_minutes} minutes total working time)."
-        )
 
     def _apply_worker_efficiency(self, base_time: float, workers: int) -> float:
         """
@@ -672,11 +591,12 @@ class LegoLeanEnv:
         if count < max_events or not self._queue:
             self._on_time_advance(t_stop)
 
-    def _on_unit_finished(self, qty: int = 1):
+    def _on_unit_finished(self, qty: int = 1, model_id: Optional[str] = None):
         """Called when finished units enter a finished buffer (e.g., E).
 
         Updates:
           - finished count
+          - finished_goods_by_model (per-model tracking)
           - lead times (FIFO match to release times)
           - WIP (decrement on completion)
           - optionally auto-releases CONWIP orders
@@ -686,6 +606,10 @@ class LegoLeanEnv:
             return
 
         self.finished += qty
+        
+        # Track finished goods by model
+        if model_id:
+            self.finished_goods_by_model[model_id] = self.finished_goods_by_model.get(model_id, 0) + qty
 
         # Lead time = finish_time - release_time (FIFO matching)
         for _ in range(qty):
@@ -750,8 +674,11 @@ class LegoLeanEnv:
             labor_cost += rate * team.size * team.busy_time
 
         # Inventory holding cost (area under inventory curves × holding rate)
+        # Exclude buffer A from inventory cost calculation
         inventory_cost = 0.0
         for b_id, area in self.buffer_time_area.items():
+            if str(b_id) == "A":
+                continue  # Skip buffer A in inventory cost calculation
             h = self.holding_costs_per_buffer.get(str(b_id), 0.0)
             inventory_cost += h * area
 
@@ -762,13 +689,9 @@ class LegoLeanEnv:
         else:
             planned_release_qty = int(planned_release_qty_dict or 0)
 
+        # demand_forecast_total equals planned_release_qty (removed redundant KPI)
+        # demand_forecast_dict kept for per-model breakdown if needed
         demand_forecast_dict = getattr(self, "demand_forecast", {})
-        if isinstance(demand_forecast_dict, dict):
-            # Per-model: sum all model forecasts
-            demand_forecast_total = sum(sum(forecast_list) for forecast_list in demand_forecast_dict.values())
-        else:
-            # Legacy: single list
-            demand_forecast_total = sum(demand_forecast_dict or [])
 
         realized_demand_dict = getattr(self, "realized_demand_total", {})
         if isinstance(realized_demand_dict, dict):
@@ -826,11 +749,9 @@ class LegoLeanEnv:
             "wip_avg_units": wip_avg,
             "utilization_per_team": utilization,
             "finished_units": self.finished,
-            "started_units": self.started,
+            "finished_goods_by_model": self.finished_goods_by_model.copy(),
             "planned_release_qty": planned_release_qty,
             "planned_release_qty_by_model": planned_release_qty_dict if isinstance(planned_release_qty_dict, dict) else {},
-            "demand_forecast_total": demand_forecast_total,
-            "demand_forecast_by_model": demand_forecast_dict if isinstance(demand_forecast_dict, dict) else {},
             "demand_realized_total": demand_realized_total,
             "demand_realized_by_model": realized_demand_dict if isinstance(realized_demand_dict, dict) else {},
             "procured_qty": procured_qty,
@@ -994,8 +915,33 @@ class LegoLeanEnv:
             else:
                 model_id = self.parameters.get("default_model_id") or "default"
         elif model_id is None:
-            # For non-release stages, try to infer model_id from recent jobs or use default
-            model_id = self.parameters.get("default_model_id") or "default"
+            # For non-release stages, try to infer model_id from available materials
+            # Check which model's BOM matches the available materials in input buffers
+            inferred_model_id = None
+            if stage.required_materials_by_model:
+                # Try each model's BOM to see which one matches available materials
+                for test_model_id, test_materials in stage.required_materials_by_model.items():
+                    # Check if all required materials for this model are available
+                    all_available = True
+                    for item_id, required_qty in test_materials.items():
+                        found = False
+                        for b_id in stage.input_buffers:
+                            buf = self.buffers.get(b_id)
+                            if buf and buf.can_pull_item(item_id, required_qty):
+                                found = True
+                                break
+                        if not found:
+                            all_available = False
+                            break
+                    if all_available:
+                        inferred_model_id = test_model_id
+                        break
+            
+            if inferred_model_id:
+                model_id = inferred_model_id
+            else:
+                # Fallback: try to infer from recent jobs or use default
+                model_id = self.parameters.get("default_model_id") or "default"
 
         # Get model-specific materials if available, otherwise use default
         required_materials = stage.required_materials.copy() if stage.required_materials else {}
@@ -1237,7 +1183,7 @@ class LegoLeanEnv:
                     outputs_logged.append((out_buffer_id, item_id, qty))
                     self.log.append(f"{self._fmt_t()} '{stage.name}' pushed {qty}x '{item_id}' → '{out_buffer_id}' (model '{model_id}').")
                     if str(out_buffer_id) in [str(x) for x in self.finished_buffers]:
-                        self._on_unit_finished(qty)
+                        self._on_unit_finished(qty, model_id=model_id)
                         self.log.append(
                             f"{self._fmt_t()} Product (model '{model_id}') finished into buffer '{out_buffer_id}'. Finished={self.finished}")
             if all_push_success:
@@ -1316,7 +1262,7 @@ class LegoLeanEnv:
             self.log.append(f"{self._fmt_t()} delivered {qty}x '{item_id}' → '{out_buffer_id}'.")
 
             if str(out_buffer_id) in [str(x) for x in self.finished_buffers]:
-                self._on_unit_finished(int(qty))
+                self._on_unit_finished(int(qty), model_id=model_id)
                 self.log.append(
                     f"{self._fmt_t()} Product (model '{model_id}') finished into buffer '{out_buffer_id}'. Finished={self.finished}")
 
@@ -1351,18 +1297,6 @@ class LegoLeanEnv:
                             "is_rework": False,
                             "model_id": model_id
                         })
-
-    def _on_release_demand(self, ev: Event):
-        """Handle scheduled demand release event. Releases orders for a specific model."""
-        model_id = ev.payload.get("model_id")
-        qty = int(ev.payload.get("qty", 0))
-        
-        if qty > 0 and model_id:
-            self.enqueue_orders(qty=qty, model_id=model_id)
-            model_name = self.model_definitions.get(model_id, {}).get("name", model_id) if self.model_definitions else model_id
-            self.log.append(
-                f"{self._fmt_t()} Released {qty} order(s) of model '{model_name}' ({model_id}) from scheduled demand."
-            )
 
         # --------------------------------------------------------------------------
     # Internal time advance
@@ -1429,14 +1363,14 @@ CONFIG: Dict[str, Any] = {
         {
             "buffer_id": "A",
             "name": "Warehouse A (Bricks)",
-            "capacity": 9999,
+            "capacity": 99999,
             "initial_stock": {
-                "a01": 50, "a02": 50, "a03": 50, "a04": 50, "a05": 50, "a06": 50, "a07": 50,
-                "b01": 50, "b02": 50, "b03": 50, "b04": 50, "b05": 50, "b06": 50, "b07": 50,
-                "b08": 50, "b09": 50, "b10": 50, "b11": 50, "b12": 50, "b13": 50, "b14": 50,
-                "b15": 50, "b16": 50, "b17": 50, "b18": 50, "b19": 50,
-                "c01": 50, "c02": 50, "c03": 50, "c04": 50, "c05": 50, "c06": 50, "c07": 50, "c08": 50,
-                "x01": 50, "x02": 50, "x03": 50, "x04": 50
+                "a01": 1500, "a02": 1500, "a03": 1500, "a04": 1500, "a05": 1500, "a06": 1500, "a07": 1500,
+                "b01": 1500, "b02": 1500, "b03": 1500, "b04": 1500, "b05": 1500, "b06": 1500, "b07": 1500,
+                "b08": 1500, "b09": 1500, "b10": 1500, "b11": 1500, "b12": 1500, "b13": 1500, "b14": 1500,
+                "b15": 1500, "b16": 1500, "b17": 1500, "b18": 1500, "b19": 1500,
+                "c01": 1500, "c02": 1500, "c03": 1500, "c04": 1500, "c05": 1500, "c06": 1500, "c07": 1500, "c08": 1500,
+                "x01": 1500, "x02": 1500, "x03": 1500, "x04": 1500
             }
         },
         {"buffer_id": "C1", "name": "C1 (Set for Axis Assembly)", "capacity": 9999, "initial_stock": {"buna01": 0, "buna02": 0, "buna03": 0, "buna04": 0}},
@@ -1467,15 +1401,6 @@ CONFIG: Dict[str, Any] = {
             "name": "Type Sorting (Classification)",
             "team_id": "T1",
             "input_buffers": ["A"],
-            # Default materials (used if model_id is "default" or not found in required_materials_by_model)
-            "required_materials": {
-                "a01": 1, "a03": 2, "a05": 2, "a06": 1, "a07": 2,
-                "b01": 1, "b02": 2, "b04": 1, "b05": 2, "b07": 1,
-                "b09": 1, "b10": 2, "b11": 1, "b13": 1, "b14": 2,
-                "b16": 1, "b18": 2,
-                "c01": 1, "c02": 1, "c03": 1, "c04": 1, "c05": 4, "c07": 1, "c08": 1,
-                "x01": 3, "x02": 4, "x03": 2
-            },
             # Model-specific input materials (optional - overrides required_materials when model_id matches)
             "required_materials_by_model": {
                 "m01": {"a01": 1, "a03": 2, "a05": 2, "a06": 1, "a07": 2,
@@ -1507,18 +1432,7 @@ CONFIG: Dict[str, Any] = {
                 "x01": 3, "x02": 4, "x03": 1, "x04": 1,
                 }   # Icomat_2000X specific materials
             },
-            # Default outputs
-            "output_buffers": {
-                # After sorting, classified parts go to B (same items)
-                "B": {
-                    "a01": 1, "a03": 2, "a05": 2, "a06": 1, "a07": 2,
-                    "b01": 1, "b02": 2, "b04": 1, "b05": 2, "b07": 1,
-                    "b09": 1, "b10": 2, "b11": 1, "b13": 1, "b14": 2,
-                    "b16": 1, "b18": 2,
-                    "c01": 1, "c02": 1, "c03": 1, "c04": 1, "c05": 4, "c07": 1, "c08": 1,
-                    "x01": 3, "x02": 4, "x03": 2
-                }
-            },
+            
             # Model-specific outputs (optional - different models may produce different sorted parts)
             "output_buffers_by_model": {
                 # Structure: model_id -> {buffer_id: {item_id: qty}}
@@ -1554,7 +1468,7 @@ CONFIG: Dict[str, Any] = {
             "base_process_time_min": 30.0,  # 30 minutes base time
             "time_distribution": {"type": "triangular", "p1": 20.0, "p2": 30.0, "p3": 45.0},  # minutes
             "transport_time_min": 3.0,  # 3 minutes transport
-            "defect_rate": 0.01,
+            "defect_rate": 0.0,
             "rework_stage_id": "S1",
             "workers": 2
         },
@@ -1563,17 +1477,7 @@ CONFIG: Dict[str, Any] = {
             "name": "Set Sorting (Kit Build)",
             "team_id": "T2",
             "input_buffers": ["B"],
-            # Build three kits from classified parts in B
-            # Default materials (used if model_id is "default" or not found in required_materials_by_model)
-            "required_materials": {
-                "a01": 1, "a03": 2, "a05": 2, "a06": 1, "a07": 2,
-                "b01": 1, "b02": 2, "b04": 1, "b05": 2, "b07": 1,
-                "b09": 1, "b10": 2, "b11": 1, "b13": 1, "b14": 2,
-                "b16": 1, "b18": 2,
-                "c01": 1, "c02": 1, "c03": 1, "c04": 1, "c05": 4, "c07": 1, "c08": 1,
-                "x01": 3, "x02": 4, "x03": 2
-            },
-            # Model-specific input materials (optional - overrides required_materials when model_id matches)
+            # Model-specific input materials
             "required_materials_by_model": {
                 "m01": {"a01": 1, "a03": 2, "a05": 2, "a06": 1, "a07": 2,
                 "b01": 1, "b02": 2, "b04": 1, "b05": 2, "b07": 1,
@@ -1620,7 +1524,7 @@ CONFIG: Dict[str, Any] = {
             "base_process_time_min": 30.0,  # 30 minutes base time
             "time_distribution": {"type": "triangular", "p1": 20.0, "p2": 30.0, "p3": 45.0},  # minutes
             "transport_time_min": 3.0,  # 3 minutes transport
-            "defect_rate": 0.01,
+            "defect_rate": 0.0,
             "rework_stage_id": "S2",
             "workers": 2
         },
@@ -1629,9 +1533,7 @@ CONFIG: Dict[str, Any] = {
             "name": "Axis Subassembly",
             "team_id": "T3",
             "input_buffers": ["C1"],
-            # Default materials
-            "required_materials": {"buna01": 1},
-            # Model-specific input materials (optional - overrides required_materials when model_id matches)
+            # Model-specific input materials
             "required_materials_by_model": {
                 "m01": {"buna01": 1},  # Sly_Slider
                 "m02": {"buna02": 1},  # Gliderlinski
@@ -1650,7 +1552,7 @@ CONFIG: Dict[str, Any] = {
             "base_process_time_min": 60.0,  # 60 minutes (1 hour) base time
             "time_distribution": {"type": "triangular", "p1": 45.0, "p2": 60.0, "p3": 80.0},  # minutes
             "transport_time_min": 4.0,  # 4 minutes transport
-            "defect_rate": 0.02,
+            "defect_rate": 0.0,
             "rework_stage_id": "S3",
             "workers": 2
         },
@@ -1659,9 +1561,7 @@ CONFIG: Dict[str, Any] = {
             "name": "Chassis Subassembly",
             "team_id": "T4",
             "input_buffers": ["C2"],
-            # Default materials
-            "required_materials": {"bunc01": 1},
-            # Model-specific input materials (optional - overrides required_materials when model_id matches)
+            # Model-specific input materials
             "required_materials_by_model": {
                 "m01": {"bunc01": 1},  # Sly_Slider
                 "m02": {"bunc02": 1},  # Gliderlinski
@@ -1680,7 +1580,7 @@ CONFIG: Dict[str, Any] = {
             "base_process_time_min": 90.0,  # 90 minutes (1.5 hours) base time
             "time_distribution": {"type": "triangular", "p1": 70.0, "p2": 90.0, "p3": 120.0},  # minutes
             "transport_time_min": 4.0,  # 4 minutes transport
-            "defect_rate": 0.02,
+            "defect_rate": 0.0,
             "rework_stage_id": "S4",
             "workers": 2
         },
@@ -1689,10 +1589,7 @@ CONFIG: Dict[str, Any] = {
             "name": "Final Assembly",
             "team_id": "T5",
             "input_buffers": ["C3", "D1", "D2"],
-            # Default materials (used if model_id is "default" or not found in required_materials_by_model)
-            "required_materials": {"bunf01": 1, "saa01": 1, "sac01": 1},
-            # Model-specific materials (optional - overrides required_materials when model_id matches)
-            # Example: Different models may require different quantities or different parts
+            # Model-specific materials
             "required_materials_by_model": {
                 "m01": {"bunf01": 1, "saa01": 1, "sac01": 1},  # Sly_Slider
                 "m02": {"bunf02": 1, "saa02": 1, "sac01": 1},  # Gliderlinski
@@ -1711,7 +1608,7 @@ CONFIG: Dict[str, Any] = {
             "base_process_time_min": 120.0,  # 120 minutes (2 hours) base time
             "time_distribution": {"type": "triangular", "p1": 90.0, "p2": 120.0, "p3": 150.0},  # minutes
             "transport_time_min": 5.0,  # 5 minutes transport
-            "defect_rate": 0.02,
+            "defect_rate": 0.0,
             "rework_stage_id": "S5",
             "workers": 2
         }
@@ -1802,16 +1699,10 @@ CONFIG: Dict[str, Any] = {
         "push_realization_noise_pct": 0.05,
         "push_procurement_waste_rate": 0.05,
         # 2026-01-09: Supplier stage IDs used for push-mode direct supply.
-        "supplier_stage_ids": ["S1"],
+        "supplier_stage_ids": [],  # S1 should process materials normally (pull from A, output to B), not act as supplier
         "material_cost_mode": "procure_forecast",
     },
 
-    # ----------------------------------------------------------------------------
-    # Random disruptions (optional)
-    # Note: Variability is now handled entirely by time_distribution per stage
-    # ----------------------------------------------------------------------------
-    "random_events": {
-    }
 }
 # ==============================================================================
 # Minimal example (you can delete this block in production)

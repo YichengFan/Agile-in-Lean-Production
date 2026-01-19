@@ -65,9 +65,6 @@ with st.sidebar:
                               value=int(cfg["parameters"].get("kanban_caps", {}).get("D2", 4)), step=1)
     else:
         st.markdown("### Push Planning (Demand-based)")
-        st.caption("💡 **How demand works**: Forecast is generated, then realization noise is applied to create actual demand. "
-                   "If realized demand > planned production, you'll have unmet demand (push mode limitation).")
-        horizon_weeks = st.number_input(
             "Demand horizon (weeks)",
             min_value=1, value=int(cfg["parameters"].get("push_demand_horizon_weeks", 3)), step=1
         )
@@ -90,10 +87,7 @@ with st.sidebar:
             "Procurement waste/safety stock (%)",
             min_value=0, max_value=30, value=int(float(cfg["parameters"].get("push_procurement_waste_rate", 0.05)) * 100)
         )
-        auto_release_push = st.checkbox(
-            "Auto release planned qty at start",
-            value=bool(cfg["parameters"].get("push_auto_release", True))
-        )
+        # Auto-release is always enabled in push mode (forecast automatically triggers production)
         margin_per_unit = st.number_input(
             "Margin per unit",
             min_value=0.0,
@@ -106,7 +100,8 @@ with st.sidebar:
         cfg["parameters"]["push_forecast_noise_pct"] = float(forecast_noise_pct) / 100.0
         cfg["parameters"]["push_realization_noise_pct"] = float(real_noise_pct) / 100.0
         cfg["parameters"]["push_procurement_waste_rate"] = float(waste_pct) / 100.0
-        cfg["parameters"]["push_auto_release"] = bool(auto_release_push)
+        # Auto-release is always enabled in push mode (forecast automatically triggers production)
+        cfg["parameters"]["push_auto_release"] = True
         cfg["parameters"]["material_cost_mode"] = "procure_forecast"
         cfg["parameters"]["release_stage_ids"] = ["S1"]
         cfg["parameters"]["conwip_wip_cap"] = None
@@ -440,7 +435,6 @@ if st.button("Run Simulation"):
     if deterministic:
         for s in cfg["stages"]:
             s["time_distribution"] = {"type": "constant"}
-        cfg["random_events"]["missing_brick_prob"] = 0.0
 
     # Assembly trace toggle
     trace_assembly = st.sidebar.checkbox("Trace assembly (store per-job consumed/produced)", value=False)
@@ -460,7 +454,7 @@ if st.button("Run Simulation"):
 
     # Order release strategy differs by mode:
     # - Pull mode: Manually release orders based on user input (model_quantities)
-    # - Push mode: Orders are automatically released based on demand forecast (via _schedule_demand_releases)
+    # - Push mode: Orders are automatically released based on demand forecast (queued immediately at start)
     if enable_pull:
         # Pull-mode: initial release only (then closed-loop CONWIP replenishes if enabled)
         # Release orders for each model type (FIFO queueing)
@@ -487,14 +481,12 @@ if st.button("Run Simulation"):
         # 2. Queue all orders immediately based on forecast
         # 3. Produce everything until finished
         # 4. Compare actual demand vs forecast in KPIs
-        if env.push_auto_release:
-            planned_total = sum(env.planned_release_qty.values()) if isinstance(env.planned_release_qty, dict) else 0
-            if planned_total > 0:
-                st.info(f"📊 Push mode: {planned_total} orders queued from forecast. Production will run until completion.")
-            else:
-                st.warning("⚠️ Push mode enabled but no orders scheduled. Check forecast parameters.")
+        # In push mode, forecast automatically triggers production (auto-release always enabled)
+        planned_total = sum(env.planned_release_qty.values()) if isinstance(env.planned_release_qty, dict) else 0
+        if planned_total > 0:
+            st.info(f"📊 Push mode: {planned_total} orders queued from forecast. Production will run until completion.")
         else:
-            st.info("ℹ️ Push mode: Auto-release is disabled. Orders will be released manually if configured.")
+            st.warning("⚠️ Push mode enabled but no orders scheduled. Check forecast parameters.")
 
     #2026-01-01 存疑，如果是push的话enqueue激活就够了，这样是否会反复激活S1？
     # Kick off: try starting all stages once
@@ -509,50 +501,58 @@ if st.button("Run Simulation"):
     kpis = env.get_kpis()
     st.subheader("KPIs")
     
-    # Show per-model forecast information if available (push mode)
-    if not enable_pull and kpis.get("demand_forecast_by_model"):
-        st.markdown("### Demand Forecast & Realization (Per-Model)")
-        forecast_by_model = kpis.get("demand_forecast_by_model", {})
+    # Show per-model production KPIs if available (push mode)
+    if not enable_pull and kpis.get("planned_release_qty_by_model"):
+        st.markdown("### Production KPIs (Per-Model)")
         realized_by_model = kpis.get("demand_realized_by_model", {})
         planned_by_model = kpis.get("planned_release_qty_by_model", {})
+        finished_by_model = kpis.get("finished_goods_by_model", {})
         
-        if forecast_by_model:
-            forecast_data = []
-            for model_id in sorted(forecast_by_model.keys()):
+        if planned_by_model:
+            kpi_data = []
+            for model_id in sorted(planned_by_model.keys()):
                 model_name = cfg.get("models", {}).get(model_id, {}).get("name", model_id)
-                forecast_total = sum(forecast_by_model[model_id]) if isinstance(forecast_by_model[model_id], list) else forecast_by_model[model_id]
-                realized = realized_by_model.get(model_id, 0)
                 planned = planned_by_model.get(model_id, 0)
-                finished = kpis.get("finished_units", 0)  # Total finished, would need per-model tracking for exact
-                
-                forecast_data.append({
+                realized = realized_by_model.get(model_id, 0)
+                produced = finished_by_model.get(model_id, 0)
+                unmet = abs(realized - produced)
+
+                # Determine status based on production vs demand
+                if realized > produced:
+                    status = "⚠️ Unmet"
+                elif realized < produced:
+                    status = "⚠️ Overproduced"
+                else:
+                    status = "✅ Met"
+
+                kpi_data.append({
                     "Model": f"{model_name} ({model_id})",
-                    "Forecast": forecast_total,
+                    "Planned": planned,
                     "Realized Demand": realized,
-                    "Planned Release": planned,
-                    "Difference": realized - forecast_total,
-                    "Status": "⚠️ Unmet" if realized > planned else "✅ Met" if realized <= planned else "✅"
+                    "Produced": produced,
+                    "Unmet Demand": unmet,
+                    "Status": status
                 })
             
-            if forecast_data:
-                forecast_df = pd.DataFrame(forecast_data)
-                st.dataframe(forecast_df, use_container_width=True)
+            if kpi_data:
+                kpi_df = pd.DataFrame(kpi_data)
+                st.dataframe(kpi_df, use_container_width=True)
                 
-                # Summary
-                total_forecast = kpis.get("demand_forecast_total", 0)
-                total_realized = kpis.get("demand_realized_total", 0)
+                # Summary totals
                 total_planned = kpis.get("planned_release_qty", 0)
-                unmet = max(0, total_realized - kpis.get("finished_units", 0))
+                total_realized = kpis.get("demand_realized_total", 0)
+                total_produced = kpis.get("finished_units", 0)
+                total_unmet = abs(total_realized - total_produced)
                 
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    st.metric("Total Forecast", total_forecast)
+                    st.metric("Total Planned", total_planned)
                 with col2:
                     st.metric("Total Realized Demand", total_realized)
                 with col3:
-                    st.metric("Total Planned Release", total_planned)
+                    st.metric("Total Produced", total_produced)
                 with col4:
-                    st.metric("Unmet Demand", unmet, delta=f"{(unmet/total_realized*100) if total_realized > 0 else 0:.1f}%")
+                    st.metric("Unmet Demand", total_unmet, delta=f"{(total_unmet/total_realized*100) if total_realized > 0 else 0:.1f}%")
     
     st.json(kpis)
 
