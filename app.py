@@ -50,19 +50,8 @@ with st.sidebar:
                                    value=bool(cfg["parameters"].get("auto_release_conwip", True)))
 
         # release stages
-        release_stage_ids = st.multiselect(
-            "Release stage(s) (token-gated)",
-            options=[s["stage_id"] for s in cfg["stages"]],
-            default=cfg["parameters"].get("release_stage_ids", ["S1"])
-        )
-
-        st.markdown("**Kanban caps (control limits)**")
-        kc1 = st.number_input("Kanban cap: C3", min_value=0,
-                              value=int(cfg["parameters"].get("kanban_caps", {}).get("C3", 4)), step=1)
-        kd1 = st.number_input("Kanban cap: D1", min_value=0,
-                              value=int(cfg["parameters"].get("kanban_caps", {}).get("D1", 4)), step=1)
-        kd2 = st.number_input("Kanban cap: D2", min_value=0,
-                              value=int(cfg["parameters"].get("kanban_caps", {}).get("D2", 4)), step=1)
+        # 强制锁定 S1，
+        cfg["parameters"]["release_stage_ids"] = ["S1"]
     else:
         st.markdown("### Push Planning (Demand-based)")
         horizon_weeks = st.number_input(
@@ -226,16 +215,45 @@ if enable_pull:
         cfg["parameters"]["auto_release_conwip"] = bool(auto_release)
 
     with p3:
-        # release_stage_ids: allow selecting which stages are gated by order tokens
-        all_stage_ids = [s["stage_id"] for s in cfg["stages"]]
-        default_release = cfg["parameters"].get("release_stage_ids", ["S1"])
-        release_stage_ids = st.multiselect(
-            "Release stage(s) (token-gated)",
-            options=all_stage_ids,
-            default=default_release if default_release else ["S1"]
-        )
-        cfg["parameters"]["release_stage_ids"] = list(release_stage_ids)
+        # --- 开始替换 ---
 
+        # 1. 注入 CSS：彻底隐藏所有图标，并禁止鼠标点击
+        st.markdown(
+            """
+            <style>
+            /* 针对 Release Stage 区域：禁止鼠标交互 */
+            div[data-testid="stMultiSelect"] {
+                pointer-events: none;
+            }
+            /* 隐藏所有 SVG 图标（叉号、下拉箭头） */
+            div[data-testid="stMultiSelect"] svg {
+                display: none !important;
+            }
+            /* 隐藏输入框，防止出现光标 */
+            div[data-testid="stMultiSelect"] input {
+                display: none !important;
+            }
+            /* 隐藏右侧的下拉点击区域 */
+            div[data-testid="stMultiSelect"] div[role="button"] {
+                display: none !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+        def enforce_s1_only():
+            st.session_state.locked_release_stage = ["S1"]
+        if "locked_release_stage" not in st.session_state:
+            st.session_state.locked_release_stage = ["S1"]
+
+        release_stage_ids = st.multiselect(
+            "Release stage(s)",
+            options=["S1"],
+            key="locked_release_stage",
+            on_change=enforce_s1_only,
+            help="Fixed to S1 for this simulation."
+        )
+        cfg["parameters"]["release_stage_ids"] = release_stage_ids
     st.markdown("**Kanban caps (control limits, not physical capacities)**")
     kcfg = cfg["parameters"].get("kanban_caps", {}) or {}
     k1, k2, k3, k4 = st.columns(4)
