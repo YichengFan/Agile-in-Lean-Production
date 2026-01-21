@@ -474,7 +474,8 @@ if st.button("Run Simulation"):
         cfg["parameters"]["release_stage_ids"] = release_stage_ids
         cfg["parameters"]["conwip_wip_cap"] = int(conwip_cap) if int(conwip_cap) > 0 else None
         cfg["parameters"]["auto_release_conwip"] = bool(auto_release)
-        cfg["parameters"]["kanban_caps"] = {"C3": int(kc1), "D1": int(kd1), "D2": int(kd2)}
+        # 改为引用主面板定义的 cap_c3, cap_d1, cap_d2
+        cfg["parameters"]["kanban_caps"] = {"C3": int(cap_c3), "D1": int(cap_d1), "D2": int(cap_d2)}
     else:
         # Push: keep demand-based settings already written in the sidebar
         cfg["parameters"]["release_stage_ids"] = cfg["parameters"].get("release_stage_ids", ["S1"])
