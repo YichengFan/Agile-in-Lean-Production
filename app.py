@@ -119,53 +119,57 @@ with st.sidebar:
         seed = st.number_input("Random seed", min_value=0, value=42, step=1)
 
     # Multi-model order release configuration
-    st.markdown("### Order Release Configuration")
-    
-    # Model type selection with quantities
-    st.markdown("**Specify quantity for each model:**")
-    model_definitions = cfg.get("models", {})
-    model_quantities = {}
-    
-    if model_definitions:
-        # Create columns for better layout (2 models per row)
-        model_ids = sorted(list(model_definitions.keys()))
-        num_cols = 2
-        num_rows = (len(model_ids) + num_cols - 1) // num_cols
-        
-        for row in range(num_rows):
-            cols = st.columns(num_cols)
-            for col_idx in range(num_cols):
-                model_idx = row * num_cols + col_idx
-                if model_idx < len(model_ids):
-                    model_id = model_ids[model_idx]
-                    model_name = model_definitions[model_id].get("name", model_id)
-                    with cols[col_idx]:
-                        qty = st.number_input(
-                            f"{model_name} ({model_id})",
-                            min_value=0,
-                            value=0,
-                            step=1,
-                            key=f"model_qty_{model_id}",
-                            help=f"Quantity of {model_name} to produce"
-                        )
-                        if qty > 0:
-                            model_quantities[model_id] = qty
-        
-        total_orders = sum(model_quantities.values())
-        if total_orders > 0:
-            st.success(f"**Total orders to release: {total_orders}**")
-            # Show breakdown
-            breakdown = ", ".join([f"{qty}x {model_definitions[mid].get('name', mid)}" 
-                                  for mid, qty in sorted(model_quantities.items())])
-            st.caption(f"Breakdown: {breakdown}")
+    model_quantities: Dict[str, int] = {}
+
+    if enable_pull:
+        st.markdown("### Order Release Configuration")
+
+        # Model type selection with quantities
+        st.markdown("**Specify quantity for each model:**")
+        model_definitions = cfg.get("models", {})
+
+        if model_definitions:
+            # Create columns for better layout (2 models per row)
+            model_ids = sorted(list(model_definitions.keys()))
+            num_cols = 2
+            num_rows = (len(model_ids) + num_cols - 1) // num_cols
+
+            for row in range(num_rows):
+                cols = st.columns(num_cols)
+                for col_idx in range(num_cols):
+                    model_idx = row * num_cols + col_idx
+                    if model_idx < len(model_ids):
+                        model_id = model_ids[model_idx]
+                        model_name = model_definitions[model_id].get("name", model_id)
+                        with cols[col_idx]:
+                            qty = st.number_input(
+                                f"{model_name} ({model_id})",
+                                min_value=0,
+                                value=0,
+                                step=1,
+                                key=f"model_qty_{model_id}",
+                                help=f"Quantity of {model_name} to produce"
+                            )
+                            if qty > 0:
+                                model_quantities[model_id] = qty
+
+            total_orders = sum(model_quantities.values())
+            if total_orders > 0:
+                st.success(f"**Total orders to release: {total_orders}**")
+                # Show breakdown
+                breakdown = ", ".join([f"{qty}x {model_definitions[mid].get('name', mid)}"
+                                      for mid, qty in sorted(model_quantities.items())])
+                st.caption(f"Breakdown: {breakdown}")
+            else:
+                st.warning("⚠️ No orders specified. Please set quantity for at least one model.")
         else:
-            st.warning("⚠️ No orders specified. Please set quantity for at least one model.")
-    else:
-        st.info("No model definitions found in config. Using default materials.")
-        # Fallback: single quantity input for backward compatibility
-        initial_release = st.number_input("Initial release qty", min_value=0, value=12, step=1)
-        if initial_release > 0:
-            model_quantities["default"] = initial_release
+            st.info("No model definitions found in config. Using default materials.")
+            # Fallback: single quantity input for backward compatibility
+            initial_release = st.number_input("Initial release qty", min_value=0, value=12, step=1)
+            if initial_release > 0:
+                model_quantities["default"] = initial_release
+
+    # Push mode: do NOT show any Order Release UI (orders are released from forecast automatically).
 
     deterministic = st.checkbox("Deterministic processing (override times; disable disruptions)", value=False)
     show_logs_n = st.number_input("Show last N logs", min_value=0, value=30, step=5)
@@ -573,7 +577,10 @@ if st.button("Run Simulation"):
                 total_planned = kpis.get("planned_release_qty", 0)
                 total_realized = kpis.get("demand_realized_total", 0)
                 total_produced = kpis.get("finished_units", 0)
-                total_unmet = abs(total_realized - total_produced)
+                #2026-01-21
+                total_unmet = sum(abs(realized - produced) for realized, produced in
+                                  zip([item["Realized Demand"] for item in kpi_data],
+                                      [item["Produced"] for item in kpi_data]))
                 
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
