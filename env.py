@@ -368,6 +368,8 @@ class LegoLeanEnv:
         self.finished_goods_by_model: Dict[str, int] = {}  # Track finished units per model
         self.started: int = 0
         self.lead_times: List[float] = []
+        # 2026-01-21 Store each unit's completion timestamp to compute Cycle Time (inter-completion time)
+        self.finish_times: List[float] = []
         self.wip_time_area: float = 0.0
         self.last_wip_time: float = 0.0
         self.current_wip: int = 0
@@ -626,6 +628,8 @@ class LegoLeanEnv:
             return
 
         self.finished += qty
+        # 2026-01-21 Record completion time(s) for Cycle Time KPI whenever a unit enters the finished goods buffer
+        self.finish_times.extend([self.t] * qty)
         
         # Track finished goods by model
         if model_id:
@@ -670,6 +674,11 @@ class LegoLeanEnv:
         sim_time = max(1e-9, self.t)  # avoid div-by-zero
         throughput = self.finished / sim_time
         lead_time_avg = sum(self.lead_times) / len(self.lead_times) if self.lead_times else 0.0
+        # 2026-01-21 Compute average Cycle Time as the mean time between consecutive unit completions (finished buffer entries)
+        cycle_time_avg = (
+            sum(self.finish_times[i] - self.finish_times[i - 1] for i in range(1, len(self.finish_times)))
+            / (len(self.finish_times) - 1)
+        ) if len(self.finish_times) >= 2 else 0.0
         wip_avg = self.wip_time_area / sim_time
         service_level =( self.finished / self.started)if self.started > 0 else 0.0
         utilization = {}
@@ -776,6 +785,8 @@ class LegoLeanEnv:
             "sim_time_min": sim_time,
             "throughput_per_min": throughput,
             "lead_time_avg_min": lead_time_avg,
+            # 2026-01-21 Add Cycle Time KPI (avg time between finished units) for flow-performance comparison
+            "cycle_time_avg_min": cycle_time_avg,
             "wip_avg_units": wip_avg,
             "utilization_per_team": utilization,
             "finished_units": self.finished,
