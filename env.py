@@ -755,10 +755,37 @@ class LegoLeanEnv:
             demand_total = int(self.demand_qty)
 
         # Sales units: cannot exceed demand_total if demand_total is defined
-        if demand_total > 0:
-            sales_units = min(int(self.finished), int(demand_total))
+        # if demand_total > 0:
+        #     sales_units = min(int(self.finished), int(demand_total))
+        # else:
+        #     sales_units = int(self.finished)
+        # --- FIX: use per-model units when available (避免不同model互相抵消) ---
+        #2026-01-22 这里的opportunity revenue lost 和 overproduction cost 计算公式有问题改了
+        produced_by_model = getattr(self, "finished_goods_by_model", {})
+        realized_by_model = realized_demand_dict if isinstance(realized_demand_dict, dict) else {}
+
+        if isinstance(produced_by_model, dict) and isinstance(realized_by_model, dict) and realized_by_model:
+            # 逐model计算：可卖= min(produced, demand)，缺口/过量分别累计
+            sales_units = 0
+            unmet_demand_units = 0
+            overproduced_units = 0
+
+            for m_id, d in realized_by_model.items():
+                p = int(produced_by_model.get(m_id, 0))
+                d = int(d or 0)
+                sales_units += min(p, d)
+                unmet_demand_units += max(0, d - p)
+                overproduced_units += max(0, p - d)
+
+            demand_total = int(sum(int(v or 0) for v in realized_by_model.values()))
         else:
-            sales_units = int(self.finished)
+            # fallback: legacy total logic
+            if demand_total > 0:
+                sales_units = min(int(self.finished), int(demand_total))
+            else:
+                sales_units = int(self.finished)
+            unmet_demand_units = max(0, int(demand_total) - int(sales_units)) if demand_total > 0 else 0
+            overproduced_units = max(0, int(self.finished) - int(sales_units)) if demand_total > 0 else 0
 
         # Revenue based on actual sales (avoid counting overproduction as sold)
         revenue_total = float(self.unit_price) * float(sales_units)
@@ -766,9 +793,18 @@ class LegoLeanEnv:
         cost_total = self.cost_material + labor_cost + inventory_cost + self.cost_other
         profit = revenue_total - cost_total
 
-        # Opportunity cost (unmet demand only): m * (D - Q)^+
-        unmet_demand = max(0, int(demand_total) - int(sales_units)) if demand_total > 0 else 0
-        opportunity_cost = float(self.margin_per_unit) * float(unmet_demand)
+        #2026-01-21 + Compute unmet demand units (underproduction) based on realized demand vs actual sales
+        unmet_demand_units = max(0, int(demand_total) - int(sales_units)) if demand_total > 0 else 0
+        #2026-01-21 + Compute overproduced units (overproduction) as finished units that were not sold due to insufficient demand
+        overproduced_units = max(0, int(self.finished) - int(sales_units)) if demand_total > 0 else 0
+
+        #2026-01-21 + Revenue opportunity loss monetizes unmet demand using unit contribution margin (foregone contribution margin)
+        revenue_opportunity_loss = float(self.margin_per_unit) * float(unmet_demand_units)
+
+        #2026-01-21 + Overproduction waste cost estimates the cost of producing units that could not be sold (material + avg labor per unit)
+        #2026-01-21 + NOTE: This is a diagnostic KPI; do NOT add it on top of cost_total, since cost_total already includes material/labor costs.
+        avg_labor_cost_per_unit = (labor_cost / float(self.finished)) if self.finished > 0 else 0.0
+        overproduction_waste_cost = (float(self.unit_material_cost) + float(avg_labor_cost_per_unit)) * float(overproduced_units)
 
         # Availability / service (demand-based)
         availability = (float(sales_units) / float(demand_total)) if demand_total > 0 else 1.0
@@ -810,7 +846,13 @@ class LegoLeanEnv:
             "cost_other": self.cost_other,
             "cost_total": cost_total,
             "profit": profit,
-            "opportunity_cost": opportunity_cost,
+            #2026-01-21 + Revenue opportunity loss (money) from unmet demand, using contribution margin
+            "revenue_opportunity_loss": revenue_opportunity_loss,
+            #2026-01-21 + Overproduction waste cost (money) for unsold produced units (diagnostic; not to be added to total costs)
+            "overproduction_waste_cost": overproduction_waste_cost,
+            #2026-01-21 + Also expose under/over production quantities for transparency
+            "unmet_demand_units": unmet_demand_units,
+            "overproduced_units": overproduced_units,
             #2026-01-10
            # "profit_after_opportunity": profit_after_opportunity,
             "availability": availability,
