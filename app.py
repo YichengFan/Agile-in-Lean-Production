@@ -550,7 +550,9 @@ if st.button("Run Simulation"):
                 planned = planned_by_model.get(model_id, 0)
                 realized = realized_by_model.get(model_id, 0)
                 produced = finished_by_model.get(model_id, 0)
-                unmet = abs(realized - produced)
+                #2026-01-21 + Compute unmet demand and overproduction per model (do NOT use abs, which mixes the two cases)
+                unmet_units = max(0, realized - produced)
+                over_units = max(0, produced - realized)
 
                 # Determine status based on production vs demand
                 if realized > produced:
@@ -565,7 +567,9 @@ if st.button("Run Simulation"):
                     "Planned": planned,
                     "Realized Demand": realized,
                     "Produced": produced,
-                    "Unmet Demand": unmet,
+                    #2026-01-21 + Split mismatch into unmet demand vs overproduction for clearer interpretation
+                    "Unmet Demand (units)": unmet_units,
+                    "Overproduction (units)": over_units,
                     "Status": status
                 })
             
@@ -577,11 +581,14 @@ if st.button("Run Simulation"):
                 total_planned = kpis.get("planned_release_qty", 0)
                 total_realized = kpis.get("demand_realized_total", 0)
                 total_produced = kpis.get("finished_units", 0)
-                #2026-01-21
-                total_unmet = sum(abs(realized - produced) for realized, produced in
-                                  zip([item["Realized Demand"] for item in kpi_data],
-                                      [item["Produced"] for item in kpi_data]))
-                
+                #2026-01-21 + Compute total unmet demand and total overproduction separately (no abs mixing)
+                total_unmet_units = sum(item["Unmet Demand (units)"] for item in kpi_data)
+                total_over_units = sum(item["Overproduction (units)"] for item in kpi_data)
+
+                #2026-01-21 + Pull monetary mismatch KPIs from env.get_kpis() (revenue opportunity loss & overproduction waste cost)
+                revenue_opportunity_loss = float(kpis.get("revenue_opportunity_loss", 0.0) or 0.0)
+                overproduction_waste_cost = float(kpis.get("overproduction_waste_cost", 0.0) or 0.0)
+                #2026-01-21 + Display totals with unmet vs overproduction split, plus monetary mismatch KPIs
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric("Total Planned", total_planned)
@@ -590,7 +597,15 @@ if st.button("Run Simulation"):
                 with col3:
                     st.metric("Total Produced", total_produced)
                 with col4:
-                    st.metric("Unmet Demand", total_unmet, delta=f"{(total_unmet/total_realized*100) if total_realized > 0 else 0:.1f}%")
+                    st.metric("Unmet Demand (units)", total_unmet_units, delta=f"{(total_unmet_units/total_realized*100) if total_realized > 0 else 0:.1f}%")
+
+                col5, col6, col7 = st.columns(3)
+                with col5:
+                    st.metric("Overproduction (units)", total_over_units)
+                with col6:
+                    st.metric("Revenue Opportunity Loss", revenue_opportunity_loss)
+                with col7:
+                    st.metric("Overproduction Waste Cost", overproduction_waste_cost)
     
     st.json(kpis)
 
