@@ -118,22 +118,23 @@ with st.sidebar:
     if use_random_seed:
         seed = st.number_input("Random seed", min_value=0, value=42, step=1)
 
-    # Multi-model order release configuration
-    model_quantities: Dict[str, int] = {}
-
+    # Order release configuration: only visible when pull is enabled (box ticked).
+    # In push mode (box not ticked), this section is hidden; release is forecast-based.
     if enable_pull:
+        # Multi-model order release configuration
         st.markdown("### Order Release Configuration")
-
+        
         # Model type selection with quantities
         st.markdown("**Specify quantity for each model:**")
         model_definitions = cfg.get("models", {})
-
+        model_quantities = {}
+        
         if model_definitions:
             # Create columns for better layout (2 models per row)
             model_ids = sorted(list(model_definitions.keys()))
             num_cols = 2
             num_rows = (len(model_ids) + num_cols - 1) // num_cols
-
+            
             for row in range(num_rows):
                 cols = st.columns(num_cols)
                 for col_idx in range(num_cols):
@@ -152,12 +153,12 @@ with st.sidebar:
                             )
                             if qty > 0:
                                 model_quantities[model_id] = qty
-
+            
             total_orders = sum(model_quantities.values())
             if total_orders > 0:
                 st.success(f"**Total orders to release: {total_orders}**")
                 # Show breakdown
-                breakdown = ", ".join([f"{qty}x {model_definitions[mid].get('name', mid)}"
+                breakdown = ", ".join([f"{qty}x {model_definitions[mid].get('name', mid)}" 
                                       for mid, qty in sorted(model_quantities.items())])
                 st.caption(f"Breakdown: {breakdown}")
             else:
@@ -169,10 +170,11 @@ with st.sidebar:
             if initial_release > 0:
                 model_quantities["default"] = initial_release
 
-    # Push mode: do NOT show any Order Release UI (orders are released from forecast automatically).
-
-    deterministic = st.checkbox("Deterministic processing (override times; disable disruptions)", value=False)
-    show_logs_n = st.number_input("Show last N logs", min_value=0, value=30, step=5)
+        show_logs_n = st.number_input("Show last N logs", min_value=0, value=30, step=5)
+    else:
+        # Push mode: section hidden; release is forecast-based. Use defaults for run options.
+        model_quantities = {}
+        show_logs_n = 30
 
 
 st.subheader("Global Parameters")
@@ -291,36 +293,7 @@ if enable_pull:
     cfg["parameters"]["kanban_caps"] = kanban_caps
 
 
-st.markdown("---")
-st.subheader("Shift Window")
-# Shift schedule disabled for continuous 3-week production
-# If shift_schedule is empty or not present, initialize with empty list (shifts disabled)
-if not cfg.get("shift_schedule"):
-    cfg["shift_schedule"] = []
 
-# Shift configuration UI (disabled - shifts not used in current setup)
-if len(cfg.get("shift_schedule", [])) > 0:
-    d1, d2 = st.columns(2)
-    with d1:
-        shift_start_min = st.number_input(
-            "Shift start (minutes in day)",
-            min_value=0,
-            max_value=24 * 60,
-            value=int(cfg["shift_schedule"][0].get("start_minute", 480))
-        )
-    with d2:
-        shift_end_min = st.number_input(
-            "Shift end (minutes in day)",
-            min_value=0,
-            max_value=24 * 60,
-            value=int(cfg["shift_schedule"][0].get("end_minute", 960))
-        )
-    cfg["shift_schedule"][0]["start_minute"] = int(shift_start_min)
-    cfg["shift_schedule"][0]["end_minute"] = int(shift_end_min)
-else:
-    # Shifts disabled - production runs continuously (24/7)
-    st.info("ℹ️ **Shifts disabled** - Production runs continuously (24/7) for 3-week simulation.")
-    cfg["shift_schedule"] = []
 
 
 st.markdown("---")
@@ -465,11 +438,6 @@ for i, bid in enumerate(buffer_ids):
 if st.button("Run Simulation"):
     t0 = time.time()
 
-    # Apply deterministic override if selected
-    if deterministic:
-        for s in cfg["stages"]:
-            s["time_distribution"] = {"type": "constant"}
-
     # Assembly trace toggle
     trace_assembly = st.sidebar.checkbox("Trace assembly (store per-job consumed/produced)", value=False)
     cfg["parameters"]["trace_assembly"] = bool(trace_assembly)
@@ -550,9 +518,7 @@ if st.button("Run Simulation"):
                 planned = planned_by_model.get(model_id, 0)
                 realized = realized_by_model.get(model_id, 0)
                 produced = finished_by_model.get(model_id, 0)
-                #2026-01-21 + Compute unmet demand and overproduction per model (do NOT use abs, which mixes the two cases)
-                unmet_units = max(0, realized - produced)
-                over_units = max(0, produced - realized)
+                unmet = abs(realized - produced)
 
                 # Determine status based on production vs demand
                 if realized > produced:
@@ -567,9 +533,7 @@ if st.button("Run Simulation"):
                     "Planned": planned,
                     "Realized Demand": realized,
                     "Produced": produced,
-                    #2026-01-21 + Split mismatch into unmet demand vs overproduction for clearer interpretation
-                    "Unmet Demand (units)": unmet_units,
-                    "Overproduction (units)": over_units,
+                    "Unmet Demand": unmet,
                     "Status": status
                 })
             
@@ -581,14 +545,8 @@ if st.button("Run Simulation"):
                 total_planned = kpis.get("planned_release_qty", 0)
                 total_realized = kpis.get("demand_realized_total", 0)
                 total_produced = kpis.get("finished_units", 0)
-                #2026-01-21 + Compute total unmet demand and total overproduction separately (no abs mixing)
-                total_unmet_units = sum(item["Unmet Demand (units)"] for item in kpi_data)
-                total_over_units = sum(item["Overproduction (units)"] for item in kpi_data)
-
-                #2026-01-21 + Pull monetary mismatch KPIs from env.get_kpis() (revenue opportunity loss & overproduction waste cost)
-                revenue_opportunity_loss = float(kpis.get("revenue_opportunity_loss", 0.0) or 0.0)
-                overproduction_waste_cost = float(kpis.get("overproduction_waste_cost", 0.0) or 0.0)
-                #2026-01-21 + Display totals with unmet vs overproduction split, plus monetary mismatch KPIs
+                total_unmet = abs(total_realized - total_produced)
+                
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric("Total Planned", total_planned)
@@ -597,15 +555,7 @@ if st.button("Run Simulation"):
                 with col3:
                     st.metric("Total Produced", total_produced)
                 with col4:
-                    st.metric("Unmet Demand (units)", total_unmet_units, delta=f"{(total_unmet_units/total_realized*100) if total_realized > 0 else 0:.1f}%")
-
-                col5, col6, col7 = st.columns(3)
-                with col5:
-                    st.metric("Overproduction (units)", total_over_units)
-                with col6:
-                    st.metric("Revenue Opportunity Loss", revenue_opportunity_loss)
-                with col7:
-                    st.metric("Overproduction Waste Cost", overproduction_waste_cost)
+                    st.metric("Unmet Demand", total_unmet, delta=f"{(total_unmet/total_realized*100) if total_realized > 0 else 0:.1f}%")
     
     st.json(kpis)
 

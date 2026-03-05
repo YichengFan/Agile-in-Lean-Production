@@ -1180,7 +1180,8 @@ class LegoLeanEnv:
         self._push_event(finish_t, "complete", {
             "stage_id": stage.stage_id,
             "job_id": job_id,
-            "model_id": model_id
+            "model_id": model_id,
+            "is_rework": is_rework
         })
 
         # Remember pulled items for BOM blocking retries
@@ -1204,17 +1205,25 @@ class LegoLeanEnv:
         # Get model-specific outputs (use stored outputs from try_start if available)
         output_buffers = getattr(stage, "_current_job_outputs", None) or stage.output_buffers.copy()
 
-        # Defect handling (rework or scrap)
+        # Defect handling (rework or scrap). Use is_rework: fresh batch (False) → rework once; already rework (True) → scrap.
+        is_rework = bool(ev.payload.get("is_rework", False))
         proceed_to_output = True
         if stage.defect_rate and random.random() < stage.defect_rate:
             # Count defects per stage
             self.stage_defect_counts[stage.stage_id] = self.stage_defect_counts.get(stage.stage_id, 0) + 1
             proceed_to_output = False
 
-            if stage.rework_stage_id and stage.rework_stage_id in self.stages:
-                # Mark as rework so it bypasses release-stage token gating, preserve model_id
+            if is_rework:
+                # Already rework: defect again → scrap (no second rework)
+                self._accumulate_wip(self.t)
+                self.current_wip = max(0, self.current_wip - 1)
+                self.log.append(f"{self._fmt_t()} '{stage.name}' defect (rework) → scrapped item (model '{model_id}').")
+                if self._release_times:
+                    self._release_times.popleft()
+            elif stage.rework_stage_id and stage.rework_stage_id in self.stages:
+                # Fresh batch defect → send to rework (next complete will have is_rework=True)
                 self._push_event(self.t, "try_start", {
-                    "stage_id": stage.rework_stage_id, 
+                    "stage_id": stage.rework_stage_id,
                     "is_rework": True,
                     "model_id": model_id
                 })
@@ -1222,7 +1231,7 @@ class LegoLeanEnv:
                     f"{self._fmt_t()} '{stage.name}' defect → rework at '{stage.rework_stage_id}' (model '{model_id}')."
                 )
             else:
-                # Scrap: item leaves the system -> reduce WIP and (FIFO) drop its release time
+                # No rework stage configured → scrap
                 self._accumulate_wip(self.t)
                 self.current_wip = max(0, self.current_wip - 1)
                 self.log.append(f"{self._fmt_t()} '{stage.name}' defect → scrapped item (model '{model_id}').")
@@ -1272,7 +1281,8 @@ class LegoLeanEnv:
                         self._push_event(self.t + 0.5, "complete", {
                             "stage_id": stage.stage_id,
                             "job_id": job_id,
-                            "model_id": model_id
+                            "model_id": model_id,
+                            "is_rework": ev.payload.get("is_rework", False)
                         })
                         return
                     pushed_buffers.append(out_buffer_id)
@@ -1791,8 +1801,8 @@ CONFIG: Dict[str, Any] = {
         "push_auto_release": False,
         "push_demand_horizon_weeks": 3,
         "push_weekly_demand_mean": 25,
-        "push_forecast_noise_pct": 0.1,
-        "push_realization_noise_pct": 0.05,
+        "push_forecast_noise_pct": 0.2,
+        "push_realization_noise_pct": 0.1,
         "push_procurement_waste_rate": 0.05,
         "supplier_stage_ids": [],  # S1 should process materials normally (pull from A, output to B), not act as supplier
         "material_cost_mode": "procure_forecast",
