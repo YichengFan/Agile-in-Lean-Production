@@ -5,7 +5,8 @@ import copy
 import json
 import time
 from typing import Dict, Any
-
+import plotly.graph_objects as go
+import plotly.express as px
 import streamlit as st
 import pandas as pd
 
@@ -502,15 +503,14 @@ if st.button("Run Simulation"):
     st.success(f"Simulation finished in {t1 - t0:.3f} sec (wall).")
 
     kpis = env.get_kpis()
-    st.subheader("KPIs")
-    
+
     # Show per-model production KPIs if available (push mode)
     if not enable_pull and kpis.get("planned_release_qty_by_model"):
-        st.markdown("### Production KPIs (Per-Model)")
+        st.markdown("### Production Plan vs. Reality (Per-Model)")
         realized_by_model = kpis.get("demand_realized_by_model", {})
         planned_by_model = kpis.get("planned_release_qty_by_model", {})
         finished_by_model = kpis.get("finished_goods_by_model", {})
-        
+
         if planned_by_model:
             kpi_data = []
             for model_id in sorted(planned_by_model.keys()):
@@ -520,7 +520,6 @@ if st.button("Run Simulation"):
                 produced = finished_by_model.get(model_id, 0)
                 unmet = abs(realized - produced)
 
-                # Determine status based on production vs demand
                 if realized > produced:
                     status = "⚠️ Unmet"
                 elif realized < produced:
@@ -536,17 +535,16 @@ if st.button("Run Simulation"):
                     "Unmet Demand": unmet,
                     "Status": status
                 })
-            
+
             if kpi_data:
                 kpi_df = pd.DataFrame(kpi_data)
                 st.dataframe(kpi_df, use_container_width=True)
-                
-                # Summary totals
+
                 total_planned = kpis.get("planned_release_qty", 0)
                 total_realized = kpis.get("demand_realized_total", 0)
                 total_produced = kpis.get("finished_units", 0)
                 total_unmet = abs(total_realized - total_produced)
-                
+
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric("Total Planned", total_planned)
@@ -555,32 +553,117 @@ if st.button("Run Simulation"):
                 with col3:
                     st.metric("Total Produced", total_produced)
                 with col4:
-                    st.metric("Unmet Demand", total_unmet, delta=f"{(total_unmet/total_realized*100) if total_realized > 0 else 0:.1f}%")
-    
-    st.json(kpis)
+                    st.metric("Unmet Demand", total_unmet,
+                              delta=f"{(total_unmet / total_realized * 100) if total_realized > 0 else 0:.1f}%",
+                              delta_color="inverse")
+    # =====================================================================
+    # 🌟 1. Executive Dashboard (Top Metrics)
+    # =====================================================================
+    st.markdown("---")
+    st.subheader("🌟 Executive Dashboard")
 
-    # Pull-control diagnostics (if present in env)
-    st.subheader("Pull Diagnostics")
-    diag = {
-        "conwip_wip_cap": cfg["parameters"].get("conwip_wip_cap"),
-        "auto_release_conwip": cfg["parameters"].get("auto_release_conwip"),
-        "release_stage_ids": cfg["parameters"].get("release_stage_ids"),
-        "kanban_caps": cfg["parameters"].get("kanban_caps"),
-    }
-    # Optional runtime counters
-    if hasattr(env, "kanban_blocking_counts"):
-        diag["kanban_blocking_counts"] = getattr(env, "kanban_blocking_counts")
-    st.json(diag)
+    # Row 1: Core Financial & Flow Metrics
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Net Profit", f"€{kpis.get('profit', 0):,.2f}")
+    with m2:
+        st.metric("Service Level", f"{kpis.get('availability', 0) * 100:.1f}%")
+    with m3:
+        st.metric("Avg Lead Time", f"{kpis.get('lead_time_avg_min', 0):.1f} min")
+    with m4:
+        st.metric("Avg WIP", f"{kpis.get('wip_avg_units', 0):.1f} units")
 
-    util_rows = [{"team_id": k, "utilization": round(v, 4)} for k, v in kpis.get("utilization_per_team", {}).items()]
-    if util_rows:
-        st.table(util_rows)
+    # Row 2: Flow Pacing (Target vs Actual)
+    st.markdown("#### 🏃‍♂️ Flow Pacing")
 
-    # --- Charts ---
-    st.subheader("KPI Time Series")
+    # Get target and actual times
+    takt_target = float(cfg["parameters"].get("target_takt_min", 10.0))
+    actual_cycle = float(kpis.get("cycle_time_avg_min", 0.0))
+
+    # Delta: Positive means actual is faster (smaller time) than target -> Good (Green)
+    # Negative means actual is slower (larger time) than target -> Bad (Red)
+    delta_val = takt_target - actual_cycle
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        st.metric("Target Takt", f"{takt_target:.1f} min/unit",
+                  help="The pace required to meet customer demand.")
+    with c2:
+        st.metric("Actual Cycle Time", f"{actual_cycle:.1f} min/unit",
+                  delta=f"{delta_val:.1f} min (vs Target)",
+                  delta_color="normal",
+                  help="Average time between consecutive finished products.")
+    with c3:
+        # Smart Diagnostic Messages in English
+        if actual_cycle == 0:
+            st.info("ℹ️ Not enough products finished to calculate cycle time.")
+        elif actual_cycle > takt_target:
+            st.error(
+                "⚠️ **Too Slow!** The line cannot meet the customer takt. Check for bottlenecks (Blocking/Starvation) in diagnostics.")
+        elif actual_cycle < takt_target * 0.7:
+            st.warning(
+                "⚠️ **Too Fast!** Producing much faster than required takt. This may cause overproduction waste if not strictly controlled by Kanban.")
+        else:
+            st.success(
+                "✅ **Perfect Pace!** Actual cycle time closely matches customer takt. The Lean flow is healthy.")
+    # =====================================================================
+    # 💰 2. Financial & Cost Analysis
+    # =====================================================================
+    st.markdown("---")
+    st.subheader("💰 Financial & Cost Analysis")
+    f1, f2 = st.columns([1, 1])
+
+    with f1:
+        st.markdown("**Cost Breakdown**")
+        cost_data = {
+            "Category": ["Material", "Labor", "Inventory"],
+            "Amount": [kpis.get('cost_material', 0), kpis.get('cost_labor', 0), kpis.get('cost_inventory', 0)]
+        }
+        df_cost = pd.DataFrame(cost_data)
+
+        # Try to use Plotly for the Pie Chart, fallback to standard bar chart if not installed
+        try:
+            import plotly.express as px
+
+            fig_pie = px.pie(df_cost, values='Amount', names='Category', hole=0.3)
+            fig_pie.update_traces(textposition='auto', textinfo='percent+label')
+            fig_pie.update_layout(margin=dict(t=20, b=20, l=80, r=80), showlegend=False)
+
+            st.plotly_chart(fig_pie, use_container_width=True)
+        except ImportError:
+            st.info("💡 Tip: Install `plotly` (`pip install plotly`) to view this as a Pie Chart.")
+            st.bar_chart(df_cost.set_index("Category"))
+
+    with f2:
+        st.markdown("**Profit & Loss Breakdown**")
+        st.write(f"- **Total Revenue**: €{kpis.get('revenue_total', 0):,.2f}")
+        st.write(f"- **Total Cost**: €{kpis.get('cost_total', 0):,.2f}")
+        st.info(f"**Net Profit**: €{kpis.get('profit', 0):,.2f}")
+
+        # Highlight lean wastes/losses if they exist
+        opp_loss = kpis.get('revenue_opportunity_loss', 0)
+        waste_cost = kpis.get('overproduction_waste_cost', 0)
+
+        if opp_loss > 0:
+            st.warning(f"⚠️ **Opportunity Loss (Unmet Demand)**: €{opp_loss:,.2f}")
+        if waste_cost > 0:
+            st.error(f"🗑️ **Overproduction Waste Cost**: €{waste_cost:,.2f}")
+
+    # =====================================================================
+    # 📊 3. Production Flow Charts
+    # =====================================================================
+    st.markdown("---")
+    st.subheader("📊 Production Flow")
+
+    # Team utilization
+    st.markdown("**Team Utilization (%)**")
+    util_data = {k: v * 100 for k, v in kpis.get("utilization_per_team", {}).items()}
+    if util_data:
+        st.bar_chart(pd.Series(util_data))
+
     if env.timeline:
         df = pd.DataFrame(env.timeline).set_index("t")
-        st.markdown("**WIP and Finished**")
+        st.markdown("**WIP and Finished Units**")
         st.line_chart(df[["wip", "finished"]], height=220)
 
         st.markdown("**Throughput (units/min)**")
@@ -593,6 +676,38 @@ if st.button("Run Simulation"):
     else:
         st.info("No timeline captured. Increase simulation time or decrease sample interval.")
 
+    # =====================================================================
+    # 🛠️ 4. Diagnostics & Bottlenecks
+    # =====================================================================
+    st.markdown("---")
+    st.subheader("🛠️ Diagnostics & Bottlenecks")
+
+    with st.expander("🔍 View Bottleneck Data (Blocking & Starvation)"):
+        col_diag1, col_diag2 = st.columns(2)
+        with col_diag1:
+            st.markdown("**Blocking Counts**")
+            st.write(kpis.get("blocking_counts", {}))
+            if hasattr(env, "kanban_blocking_counts"):
+                st.markdown("**Kanban Blocking Counts**")
+                st.write(getattr(env, "kanban_blocking_counts"))
+        with col_diag2:
+            st.markdown("**Starvation Counts**")
+            st.write(kpis.get("starvation_counts", {}))
+
+    with st.expander("⚙️ View Pull Diagnostics Configuration"):
+        diag = {
+            "conwip_wip_cap": cfg["parameters"].get("conwip_wip_cap"),
+            "auto_release_conwip": cfg["parameters"].get("auto_release_conwip"),
+            "release_stage_ids": cfg["parameters"].get("release_stage_ids"),
+            "kanban_caps": cfg["parameters"].get("kanban_caps"),
+        }
+        st.json(diag)
+
+    with st.expander("📄 View Raw KPI JSON"):
+        st.json(kpis)
+
+    # Downloads
+    # ... (Keep your existing Downloads section here) ...
     # Downloads
     st.subheader("Artifacts")
     st.download_button(
