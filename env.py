@@ -717,12 +717,13 @@ class LegoLeanEnv:
 
         # Inventory holding cost (area under inventory curves × holding rate)
         # Exclude buffer A from inventory cost calculation
-        inventory_cost = 0.0
-        for b_id, area in self.buffer_time_area.items():
-            if str(b_id) == "A":
-                continue  # Skip buffer A in inventory cost calculation
-            h = self.holding_costs_per_buffer.get(str(b_id), 0.0)
-            inventory_cost += h * area
+        #2026-3-7
+        # inventory_cost = 0.0
+        # for b_id, area in self.buffer_time_area.items():
+        #     if str(b_id) == "A":
+        #         continue  # Skip buffer A in inventory cost calculation
+        #     h = self.holding_costs_per_buffer.get(str(b_id), 0.0)
+        #     inventory_cost += h * area
 
         # Handle per-model forecasts (new structure) or legacy single forecast
         planned_release_qty_dict = getattr(self, "planned_release_qty", {})
@@ -792,6 +793,31 @@ class LegoLeanEnv:
 
         # Revenue based on actual sales (avoid counting overproduction as sold)
         revenue_total = float(self.unit_price) * float(sales_units)
+        # ---------- 2026-3-7全新的、更真实的 Inventory Cost 计算 ----------
+        # ---------- 修正版：完全基于商业常识的库存成本计算 ----------
+        inventory_cost = 0.0
+
+        # 1. 流水线在制品 (WIP) 成本：这部分用真实的模拟数据 (排除A和E)
+        for b_id, area in self.buffer_time_area.items():
+            if str(b_id) in ["A", "E"]:
+                continue
+            h = self.holding_costs_per_buffer.get(str(b_id), 0.0)
+            inventory_cost += h * area
+
+        # 2. Push 模式的惩罚一：多买的原材料吃灰
+        # 买进来的总数 (procured_qty) 减去真正卖掉的 (sales_units)，剩下的全是多余的废料
+        if self.push_demand_enabled:
+            excess_raw = max(0, self.procured_qty - sales_units)
+            h_A = self.holding_costs_per_buffer.get("A", 0.0005)
+            inventory_cost += excess_raw * sim_time * h_A
+
+        # 3. Push 模式的惩罚二：卖不出去的成品呆滞库存 (这就完全符合你的直觉了！)
+        # 只有过量生产的 (overproduced_units) 才会压在手里交高昂的仓储费
+        h_E = self.holding_costs_per_buffer.get("E", 0.0025)
+        if overproduced_units > 0:
+            # 假设这些滞销品平均在仓库里放了一半的模拟时间
+            inventory_cost += overproduced_units * (sim_time / 2) * h_E
+        # --------------------------------------------------------------------
 
         cost_total = self.cost_material + labor_cost + inventory_cost + self.cost_other
         profit = revenue_total - cost_total
