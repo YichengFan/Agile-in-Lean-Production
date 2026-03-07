@@ -551,6 +551,9 @@ class LegoLeanEnv:
         self._accumulate_wip(self.t)
         self.current_wip += qty
         self.started += qty
+        # 2026-3-7[NEW] 修复 Pull 模式的材料成本：当订单正式进入产线时，扣除对应数量的材料费
+        if not self.push_demand_enabled:
+            self.cost_material += self.unit_material_cost * qty
 
         # Track release timestamps for lead-time KPI (FIFO)
         # Also track model types for each release
@@ -1766,28 +1769,34 @@ CONFIG: Dict[str, Any] = {
             "m02": 0.10,  # Gliderlinski 10%
             "m04": 0.10   # Icomat_2000X 10%
         },
-        # Cost and revenue settings (all optional; units in currency/second where applicable)
+        # 2026-3-6 Cost and revenue settings (基于德国实际制造业情况校准)
         "cost": {
-            "unit_price": 10000.0,           # revenue per finished glider
-            "unit_material_cost": 4400.0,    # material cost per released order (can be adjusted to per-BOM)
-            "labor_costs_per_team_min": {    # cost rate per team per second (multiplied by team size)
-                "T1": 0.30,
-                "T2": 0.30,
-                "T3": 0.30,
-                "T4": 0.30,
-                "T5": 0.30
+            "unit_price": 1500.0,  # 成品售价 (例如高端 E-bike 或 精密组件)
+            "unit_material_cost": 900.0,  # 单件原材料成本 (约占售价 60%)
+            "margin_per_unit": 600.0,  # 边际贡献/毛利润 (1500 - 900，用于计算错失订单的机会损失)
+
+            # 人工成本: 按企业实际用工成本 15 欧元/小时计算 -> 15 / 60 = 0.25 欧元/分钟
+            "labor_costs_per_team_min": {
+                "T1": 0.25,
+                "T2": 0.25,
+                "T3": 0.25,
+                "T4": 0.25,
+                "T5": 0.25
             },
-            "holding_costs_per_buffer_sec": { # cost rate per unit inventory per second
-                "A": 0.0005, "B": 0.0005,
-                "C1": 0.001,
-                "C2": 0.001,
-                "C3": 0.001,
-                "D1": 0.001,
-                "D2": 0.001,
-                "E": 0.0005
+
+            # 库存持有成本: 年化综合成本按货值的 15-20% 计算，折算到每分钟
+            # (注: 代码中虽然 key 叫 _sec, 但实际逻辑是按分钟乘以面积计算的)
+            "holding_costs_per_buffer_sec": {
+                "A": 0.0005,  # 原材料仓库成本较低
+                "B": 0.0005,
+                "C1": 0.0010,  # WIP 在制品占用资金和车间空间，成本翻倍
+                "C2": 0.0010,
+                "C3": 0.0010,
+                "D1": 0.0015,  # 半成品价值更高
+                "D2": 0.0015,
+                "E": 0.0025  # 成品仓储及资金占用成本最高
             },
-            "margin_per_unit": 5600.0,       # gross margin per finished glider (before costs)
-            "demand_qty": None               # optional cap on sellable units (None = unlimited)
+            "demand_qty": None  # 可选：销售数量上限
         },
         "conwip_wip_cap": 12,  # 全局 WIP 上限（先用 8~15 试，建议从 12 起步）
         "auto_release_conwip": True,  # 成品出系统后自动补放行
