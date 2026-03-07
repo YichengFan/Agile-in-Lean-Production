@@ -614,10 +614,37 @@ if st.button("Run Simulation"):
     f1, f2 = st.columns([1, 1])
 
     with f1:
-        st.markdown("**Cost Breakdown**")
+        st.markdown("**Cost Breakdown (Lean Perspective)**")
+
+        # 获取基础数据
+        total_mat = kpis.get('cost_material', 0)
+        total_lab = kpis.get('cost_labor', 0)
+        inv_holding = kpis.get('cost_inventory', 0)
+        waste_cost = kpis.get('overproduction_waste_cost', 0)
+
+        # 在精益视角下，把白白浪费的材料和人工从“有效成本”里剔除出来，单独展示
+        # 先算出当前模拟下，真实的材料和人工比例
+        total_base_cost = total_mat + total_lab
+        mat_ratio = total_mat / total_base_cost  # 如果材料占大头，算出来可能是 0.791
+        lab_ratio = total_lab / total_base_cost  # 算出来可能是 0.209
+
+        # 然后再用真实的比例去扣除
+        effective_mat = max(0, total_mat - (waste_cost * mat_ratio))
+        effective_lab = max(0, total_lab - (waste_cost * lab_ratio))
+
         cost_data = {
-            "Category": ["Material", "Labor", "Inventory"],
-            "Amount": [kpis.get('cost_material', 0), kpis.get('cost_labor', 0), kpis.get('cost_inventory', 0)]
+            "Category": [
+                "Effective Material",
+                "Effective Labor",
+                "Inventory cost (Rent/Space)",
+                "⚠️ Overproduction Waste (Dead Stock)"
+            ],
+            "Amount": [
+                effective_mat,
+                effective_lab,
+                inv_holding,
+                waste_cost
+            ]
         }
         df_cost = pd.DataFrame(cost_data)
 
@@ -625,9 +652,22 @@ if st.button("Run Simulation"):
         try:
             import plotly.express as px
 
-            fig_pie = px.pie(df_cost, values='Amount', names='Category', hole=0.3)
-            fig_pie.update_traces(textposition='auto', textinfo='percent+label')
-            fig_pie.update_layout(margin=dict(t=20, b=20, l=80, r=80), showlegend=False)
+            # 给浪费分配一个醒目的红色
+            color_discrete_map = {
+                "Effective Material": "#1f77b4",
+                "Effective Labor": "#9edae5",
+                "Holding (Rent/Space)": "#ff7f0e",
+                "⚠️ Overproduction Waste (Dead Stock)": "#d62728"
+            }
+            fig_pie = px.pie(df_cost, values='Amount', names='Category', hole=0.3,
+                             color='Category', color_discrete_map=color_discrete_map)
+            fig_pie.update_traces(textposition='auto', textinfo='percent')
+
+            # 把图例放到下面以免挤占空间
+            fig_pie.update_layout(
+                margin=dict(t=20, b=20, l=20, r=20),
+                legend=dict(orientation="h", yanchor="bottom", y=-0.5, xanchor="center", x=0.5)
+            )
 
             st.plotly_chart(fig_pie, use_container_width=True)
         except ImportError:
