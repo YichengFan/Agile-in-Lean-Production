@@ -21,11 +21,11 @@ python env.py
 ```
 
 **Notes:**
-- The system now supports **multi-model production** (4 different product models: m01-m04)
-- **Push mode with demand forecasting** is the primary production mode
-- Time units are in **minutes** (realistic production times)
-- All configuration lives in `env.py`'s `CONFIG` dictionary
-- Randomness is enabled by default; you can toggle Deterministic processing in the UI
+- The system supports **multi-model production** (e.g. m01–m04) and **Push** or **Pull** mode from the UI
+- **Pull mode** (Enable Pull ticked): manual **Order Release Configuration** (quantities per model), CONWIP WIP cap, Kanban caps, simulation time adjustable
+- **Push mode** (Enable Pull unticked): demand-forecast-based release; Order Release section is hidden; simulation time follows demand horizon
+- Time units are **minutes**; configuration is in `env.py`'s `CONFIG` dictionary
+- Optional random seed in the UI for reproducibility
 
 ---
 
@@ -41,28 +41,25 @@ This document focuses on the **simulation model** implementation details and cur
 
 ## 1) System Overview
 
-The current system implements a **push-based production system with demand forecasting** that supports **multi-model production**. The system:
+The system implements a **dual-mode production simulator** (Push and Pull) with **multi-model production**:
 
-- Generates 3-week demand forecasts for multiple product models
-- Allocates demand across models based on probability distribution
-- Automatically queues production orders based on forecasts
-- Tracks production performance per model
-- Calculates KPIs including unmet demand and overproduction
+- **Push mode**: demand forecasting over a horizon (e.g. 3 weeks), automatic order release, per-model planned vs. realized vs. produced KPIs, unmet demand and overproduction
+- **Pull mode**: token-gated order release at S1, CONWIP WIP cap, Kanban buffer caps, manual Order Release Configuration (quantities per model) in the UI when “Enable Pull” is ticked
+- Both modes share the same DES engine, BOM-driven stages, defects/rework logic, and KPI framework
 
 ### Production Modes
 
-**Push Mode (Primary - Demand Forecasting):**
-- Forecasts demand for a specified horizon (default: 3 weeks)
-- Applies forecast noise and realization noise
-- Automatically releases orders at simulation start
-- Tracks planned vs. realized vs. produced quantities per model
-- Calculates unmet demand and overproduction
+**Push Mode (Demand-based):**
+- Demand horizon (weeks), weekly demand mean, forecast and realization noise, procurement waste
+- Orders are queued at simulation start from the forecast; no manual order quantities in the UI
+- Tracks planned vs. realized vs. produced per model; KPIs for unmet demand and overproduction
+- Simulation time is derived from the demand horizon (e.g. weeks × 5 days × 8 hours × 60 min)
 
-**Pull Mode (Legacy - CONWIP + Kanban):**
-- Token-gated order release
-- CONWIP WIP cap control
-- Kanban buffer caps
-- Currently needs fixes (see Future Work)
+**Pull Mode (CONWIP + Kanban):**
+- **Order Release Configuration** (sidebar): visible only when “Enable Pull” is ticked; user sets quantity per model to release
+- Token-gated release at release stages (e.g. S1); rework jobs bypass token gating (`is_rework=True`)
+- CONWIP WIP cap and closed-loop CONWIP (auto release on finish) option
+- Kanban caps on output buffers; simulation time is user-configurable (minutes)
 
 ---
 
@@ -138,9 +135,17 @@ This means:
 - **Model-specific outputs**: Each model can produce different finished goods
   - `output_buffers_by_model`: Dict[model_id, Dict[buffer_id, Dict[item_id, quantity]]]
 
-### Other Parameters
+### Defect and Rework Parameters
 
 - **Defect probability**: q<sub>i</sub> ∈ [0, 1] (default: 0.0 for all stages)
+- **Rework stage**: `rework_stage_id` per stage (typically the same stage, e.g. S2 → S2)
+- **Rework semantics**: Each job is tagged with `is_rework` (False = fresh, True = already reworked). On defect:
+  - **Fresh batch** (`is_rework` False): send to rework (one `try_start` at `rework_stage_id` with `is_rework=True`); no release token consumed
+  - **Already rework** (`is_rework` True): scrap (decrement WIP, drop one release time); no second rework
+- Applies in both Push and Pull modes
+
+### Other Parameters
+
 - **Buffer capacity**: cap<sub>b</sub> ∈ ℕ ∪ {∞}
 - **Shift schedule**: Currently disabled (24/7 production)
 
@@ -205,47 +210,47 @@ This means:
 
 ## 6) Event Logic
 
-### Order Release (Push Mode)
+### Order Release
 
-- Orders are automatically queued at simulation start based on forecast
-- Each order is tagged with a `model_id`
-- Orders are stored in `_stage_order_models[stage_id]` as a FIFO queue
+**Push mode:**
+- Orders are queued at simulation start from the demand forecast; each order has a `model_id`
+- Stored in `_stage_order_models[stage_id]` (FIFO); no manual order entry in the UI
+
+**Pull mode:**
+- User sets **Order Release Configuration** (quantity per model) in the sidebar when “Enable Pull” is ticked
+- Those quantities are enqueued at run time as orders (FIFO); release stages consume tokens and pop model_id from the queue
+- Rework jobs do not consume tokens (`is_rework=True`)
 
 ### Try-Start at Stage i
 
 A stage i can start only if all of the following hold:
 
 1. **Idle condition**: Y<sub>i</sub>(t) = 0 (`stage.busy == False`)
-2. **Release-stage token gating** (if i ∈ release_stage_ids):
-   - `stage_orders[i] > 0` must hold
-   - Starting consumes one token
-   - Model_id is popped from the FIFO queue
+2. **Release-stage token gating** (if i ∈ release_stage_ids and **not** rework):
+   - For **rework** jobs (`is_rework=True`), token gating is **bypassed** (no token consumed)
+   - For normal jobs: `stage_orders[i] > 0`, then one token consumed and model_id popped from FIFO
 3. **Material availability (BOM)**:
-   - For release stages: model_id determines which BOM to use
-   - For downstream stages: model_id is inferred from available materials
+   - For release stages: model_id from order queue or event payload
+   - For downstream stages: model_id inferred from available materials
    - All required materials must be available in input buffers
-4. **Kanban gating** (if enabled):
-   - Output buffers must not exceed Kanban caps
+4. **Kanban gating** (if enabled): output buffers must not exceed Kanban caps
 
 If all checks pass:
 - Pull BOM items from buffers (model-specific)
 - Set Y<sub>i</sub>(t) = 1
 - Calculate processing time: `base_time / √workers` + sample from distribution
-- Schedule `complete` event at t + S<sub>i</sub>
+- Schedule `complete` event at t + S<sub>i</sub> with **`is_rework`** set from the try_start payload (fresh vs rework)
 
 ### Completion at Stage i
 
 On `complete(i)`:
 - Stop team utilization timer U<sub>i</sub>
-- **Defect handling** (if q<sub>i</sub> > 0):
-  - Route to rework or scrap
-- **Push outputs** (model-specific):
-  - Use `output_buffers_by_model[model_id]` if available
-  - Otherwise use default `output_buffers`
-  - If downstream is blocked, retry later
-  - If output goes to finished buffer E:
-    - Increment `finished_goods_by_model[model_id]`
-    - Decrement WIP
+- Read **`is_rework`** from the complete event payload (set at try_start).
+- **Defect handling** (if q<sub>i</sub> > 0 and defect sampled):
+  - **If `is_rework` True**: scrap (decrement WIP, drop one release time from FIFO); no delivery; free stage; schedule one normal try_start so the stage can pull the next job; then **return** (no output push, no “wake consumers”).
+  - **If `is_rework` False** and rework_stage_id set: push one **try_start** at `rework_stage_id` with `is_rework=True` and same model_id; no delivery; free stage; do **not** schedule a normal try_start (rework try_start was already pushed); then **return**.
+  - **If `is_rework` False** and no rework stage: scrap (same as above); free stage; schedule normal try_start; return.
+- **If no defect**: push outputs (model-specific), free stage, schedule normal try_start, wake downstream consumers. Use `output_buffers_by_model[model_id]` if available, else `output_buffers`. If output blocked, retry complete later (payload preserves `is_rework`). If output goes to finished buffer E, increment `finished_goods_by_model[model_id]` and decrement WIP.
 
 ### Model ID Propagation
 
@@ -349,13 +354,15 @@ Each stage can have model-specific materials:
 
 ### UI Configuration (app.py)
 
-The Streamlit UI allows interactive configuration of:
-- Production mode (Push/Pull)
-- Demand forecasting parameters
-- Stage processing times
-- Buffer initial stocks
-- Team sizes
-- Time distributions
+The Streamlit UI allows:
+- **Mode**: Enable Pull (checkbox) — Pull shows Order Release Configuration and CONWIP/Kanban; Push shows demand horizon, forecast/noise, margin
+- **Order Release Configuration**: visible only when Pull is enabled; quantity per model (m01–m04, etc.)
+- **Simulation time**: in Pull mode user-defined (minutes); in Push mode derived from demand horizon
+- **Global parameters**: target takt, timeline sample Δt
+- **Pull controls** (when Pull enabled): CONWIP WIP cap, closed-loop CONWIP, release stage(s), Kanban caps
+- **Processing & Quality** (expander): per-stage base time, workers, time distribution, transport, defect rate
+- **Initial buffer stocks**: JSON per buffer
+- **Random seed**: optional for reproducibility
 
 ---
 
@@ -368,6 +375,8 @@ The Streamlit UI allows interactive configuration of:
 | Effective time | `base_time / √workers` (deterministic) |
 | δ<sub>i</sub> | `transport_time_min` |
 | q<sub>i</sub> | `defect_rate` (default: 0.0) |
+| Rework stage | `rework_stage_id` (per stage; often same stage) |
+| Fresh vs rework | `is_rework` on try_start/complete payloads; rework bypasses token gating |
 | Model-specific BOM | `required_materials_by_model[model_id]` |
 | Model-specific outputs | `output_buffers_by_model[model_id]` |
 | Forecast parameters | `push_*` parameters in `CONFIG` |
@@ -384,14 +393,14 @@ The Streamlit UI allows interactive configuration of:
 ## 10) Simulation Assumptions
 
 - **Discrete-event simulation**: Events processed in chronological order using a priority queue
-- **Push strategy (primary)**: Orders released automatically based on demand forecast
+- **Dual mode**: Push (forecast-based release) or Pull (token-gated + CONWIP + Kanban); same engine and BOM/defect logic
 - **Time unit**: Minutes (realistic production times)
 - **Worker efficiency**: Deterministic square root function (base_time / √workers)
 - **24/7 production**: Shift schedules disabled for continuous operation
 - **Model-specific BOMs**: Each model can have different material requirements
 - **FIFO order processing**: Orders processed in first-in-first-out order per model
-- **Material procurement**: Materials added to Buffer A at start based on forecast + waste
-- **No missing bricks**: Removed as a source of variability (time distribution handles variability)
+- **Defect/rework**: One rework per job (fresh → rework; rework again → scrap); `is_rework` carried on try_start and complete events; rework does not consume release tokens
+- **Material procurement** (Push): Materials added to Buffer A at start based on forecast + waste
 
 ---
 
@@ -413,12 +422,18 @@ The Streamlit UI allows interactive configuration of:
 - Automatic order queuing
 - Material procurement with waste/safety stock
 
+### Defect and Rework
+
+- Per-stage defect rate and rework_stage_id (typically same stage)
+- `is_rework` on try_start and complete: fresh batch → one rework allowed; defect on rework → scrap
+- Rework jobs bypass release-stage token gating; no double delivery or double try_start on defect path
+
 ### Realistic Time System
 
 - Time in minutes (not seconds)
-- Deterministic worker efficiency
-- Configurable time distributions
-- Transport times per stage
+- Deterministic worker efficiency (√workers)
+- Configurable time distributions (constant, normal, triangular, etc.)
+- Transport times per stage (and per-output for S2 → C1/C2/C3)
 
 ### KPI Tracking
 
@@ -480,13 +495,9 @@ for model_id in planned.keys():
 
 The following improvements are planned:
 
-### 1. Fix Pull Production System
-- **Current status**: Pull mode (CONWIP + Kanban) exists but needs fixes
-- **Issues to address**:
-  - Ensure proper token gating
-  - Fix CONWIP WIP cap enforcement
-  - Verify Kanban buffer cap logic
-  - Test closed-loop CONWIP behavior
+### 1. Pull Mode Enhancements
+- **Current status**: Pull mode (CONWIP + Kanban) and Order Release Configuration are implemented and used when “Enable Pull” is ticked
+- **Possible enhancements**: Additional CONWIP/Kanban policies, more release-stage options, validation of Little’s Law under CONWIP
 
 ### 2. Adjust Time System
 - **Current status**: Time is in minutes, but may need further adjustments
@@ -525,13 +536,13 @@ The following improvements are planned:
 
 ```
 Agile-in-Lean-Production/
-├── env.py                 # Core simulation engine and CONFIG
-├── app.py                 # Streamlit UI for simulation control
-├── README.md              # Original documentation (outdated)
-├── README2.md             # This file - current documentation
-├── MULTI_MODEL_GUIDE.md   # Detailed multi-model production guide
-├── mathematical_model.md # Mathematical model formulation
-├── requirements.txt       # Python dependencies
+├── README.md              # Project overview and quick start (links here)
+├── env.py                 # Core DES engine, CONFIG, defect/rework logic
+├── app.py                 # Streamlit UI (Push/Pull, Order Release, CONWIP/Kanban)
+├── readme3.md             # This file — simulation model documentation
+├── MULTI_MODEL_GUIDE.md   # Multi-model production guide
+├── mathematical_model.md  # Mathematical model formulation
+├── requirements.txt      # Python dependencies
 └── baseline.txt          # Baseline model specifications
 ```
 
@@ -554,5 +565,5 @@ Agile-in-Lean-Production/
 
 ---
 
-**Last Updated**: 2026-01-22  
-**Version**: 2.0 (Multi-Model with Demand Forecasting)
+**Last Updated**: 2026-03-05  
+**Version**: 2.1 (Push/Pull dual mode, defect/rework with `is_rework`, Order Release only in Pull)
