@@ -154,16 +154,24 @@ with st.sidebar:
                             )
                             if qty > 0:
                                 model_quantities[model_id] = qty
-            
+
             total_orders = sum(model_quantities.values())
             if total_orders > 0:
                 st.success(f"**Total orders to release: {total_orders}**")
                 # Show breakdown
-                breakdown = ", ".join([f"{qty}x {model_definitions[mid].get('name', mid)}" 
-                                      for mid, qty in sorted(model_quantities.items())])
+                breakdown = ", ".join([f"{qty}x {model_definitions[mid].get('name', mid)}"
+                                       for mid, qty in sorted(model_quantities.items())])
                 st.caption(f"Breakdown: {breakdown}")
+
+                #2026-3-10 自动计算并显示 Target Takt ===
+                calculated_takt = float(sim_time) / float(total_orders)
+                st.metric("Calculated Target Takt (min/unit)", f"{calculated_takt:.2f}",
+                          help="Simulation Time / Total Orders")
+                cfg["parameters"]["target_takt_min"] = calculated_takt
+
             else:
                 st.warning("⚠️ No orders specified. Please set quantity for at least one model.")
+                cfg["parameters"]["target_takt_min"] = None  # 没有订单就不算
         else:
             st.info("No model definitions found in config. Using default materials.")
             # Fallback: single quantity input for backward compatibility
@@ -176,26 +184,18 @@ with st.sidebar:
         # Push mode: section hidden; release is forecast-based. Use defaults for run options.
         model_quantities = {}
         show_logs_n = 30
+        cfg["parameters"]["target_takt_min"] = None  #2026-3-10 Push 模式下清空 Takt ===
 
 
 st.subheader("Global Parameters")
-c1, c2 = st.columns(2)
-with c1:
-    takt = st.number_input(
-        "Target takt (min)",
-        min_value=0.0,
-        value=float(cfg["parameters"].get("target_takt_min", cfg["parameters"].get("target_takt_sec", 10.0) / 60.0)),
-        step=0.5
-    )
-    cfg["parameters"]["target_takt_min"] = float(takt)
-with c2:
-    sample_dt = st.number_input(
-        "Timeline sample Δt (min)",
-        min_value=0.5,
-        value=float(cfg["parameters"].get("timeline_sample_dt_min", cfg["parameters"].get("timeline_sample_dt_sec", 5.0) / 60.0)),
-        step=0.5
-    )
-    cfg["parameters"]["timeline_sample_dt_min"] = float(sample_dt)
+sample_dt = st.number_input(
+    "Timeline sample Δt (min)",
+    min_value=0.5,
+    value=float(cfg["parameters"].get("timeline_sample_dt_min", cfg["parameters"].get("timeline_sample_dt_sec", 5.0) / 60.0)),
+    step=0.5,
+    help="Interval for logging time-series data to charts"
+)
+cfg["parameters"]["timeline_sample_dt_min"] = float(sample_dt)
 
 
 if enable_pull:
@@ -576,36 +576,48 @@ if st.button("Run Simulation"):
     # Row 2: Flow Pacing (Target vs Actual)
     st.markdown("#### 🏃‍♂️ Flow Pacing")
 
-    # Get target and actual times
-    takt_target = float(cfg["parameters"].get("target_takt_min", 10.0))
+    raw_takt = cfg["parameters"].get("target_takt_min")
     actual_cycle = float(kpis.get("cycle_time_avg_min", 0.0))
 
-    # Delta: Positive means actual is faster (smaller time) than target -> Good (Green)
-    # Negative means actual is slower (larger time) than target -> Bad (Red)
-    delta_val = takt_target - actual_cycle
+    # 如果有 Target Takt (Pull 模式)
+    if raw_takt is not None:
+        takt_target = float(raw_takt)
+        delta_val = takt_target - actual_cycle
 
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
-        st.metric("Target Takt", f"{takt_target:.1f} min/unit",
-                  help="The pace required to meet customer demand.")
-    with c2:
-        st.metric("Actual Cycle Time", f"{actual_cycle:.1f} min/unit",
-                  delta=f"{delta_val:.1f} min (vs Target)",
-                  delta_color="normal",
-                  help="Average time between consecutive finished products.")
-    with c3:
-        # Smart Diagnostic Messages in English
-        if actual_cycle == 0:
-            st.info("ℹ️ Not enough products finished to calculate cycle time.")
-        elif actual_cycle > takt_target:
-            st.error(
-                "⚠️ **Too Slow!** The line cannot meet the customer takt. Check for bottlenecks (Blocking/Starvation) in diagnostics.")
-        elif actual_cycle < takt_target * 0.7:
-            st.warning(
-                "⚠️ **Too Fast!** Producing much faster than required takt. This may cause overproduction waste if not strictly controlled by Kanban.")
-        else:
-            st.success(
-                "✅ **Perfect Pace!** Actual cycle time closely matches customer takt. The Lean flow is healthy.")
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            st.metric("Target Takt", f"{takt_target:.1f} min/unit",
+                      help="The pace required to meet customer demand.")
+        with c2:
+            st.metric("Actual Cycle Time", f"{actual_cycle:.1f} min/unit",
+                      delta=f"{delta_val:.1f} min (vs Target)",
+                      delta_color="normal",
+                      help="Average time between consecutive finished products.")
+        with c3:
+            if actual_cycle == 0:
+                st.info("ℹ️ Not enough products finished to calculate cycle time.")
+            elif actual_cycle > takt_target:
+                st.error(
+                    "⚠️ **Too Slow!** The line cannot meet the customer takt. Check for bottlenecks (Blocking/Starvation) in diagnostics.")
+            elif actual_cycle < takt_target * 0.7:
+                st.warning(
+                    "⚠️ **Too Fast!** Producing much faster than required takt. This may cause overproduction waste if not strictly controlled by Kanban.")
+            else:
+                st.success(
+                    "✅ **Perfect Pace!** Actual cycle time closely matches customer takt. The Lean flow is healthy.")
+
+    # 如果没有 Target Takt (Push 模式)
+    else:
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            st.metric("Actual Cycle Time", f"{actual_cycle:.1f} min/unit",
+                      help="Average time between consecutive finished products.")
+        with c2:
+            if actual_cycle == 0:
+                st.info("ℹ️ Not enough products finished to calculate cycle time.")
+            else:
+                st.info(
+                    "ℹ️ **Push Mode**: Flow pace is determined by forecast release rate. No fixed Target Takt applied.")
     # =====================================================================
     # 💰 2. Financial & Cost Analysis
     # =====================================================================
@@ -706,8 +718,8 @@ if st.button("Run Simulation"):
         st.markdown("**WIP and Finished Units**")
         st.line_chart(df[["wip", "finished"]], height=220)
 
-        st.markdown("**Throughput (units/min)**")
-        st.line_chart(df[["throughput_per_min"]], height=220)
+        st.markdown("**Throughput (units/hour)**")
+        st.line_chart(df[["throughput_per_hour"]], height=220)
 
         buffer_cols = [c for c in ["B", "C1", "C2", "C3", "D1", "D2", "E"] if c in df.columns]
         if buffer_cols:
