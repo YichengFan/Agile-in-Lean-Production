@@ -675,7 +675,10 @@ class LegoLeanEnv:
     def get_kpis(self) -> Dict[str, Any]:
         """Return KPI snapshot for the elapsed simulation."""
         sim_time = max(1e-9, self.t)  # avoid div-by-zero
-        throughput = self.finished / sim_time
+        #2026-3-10
+        throughput_per_min = self.finished / sim_time
+        throughput_per_hour = throughput_per_min * 60.0
+        throughput_per_day = throughput_per_min * 480.0  # 按一天8小时算
         lead_time_avg = sum(self.lead_times) / len(self.lead_times) if self.lead_times else 0.0
         # 2026-01-21 Compute average Cycle Time as the mean time between consecutive unit completions (finished buffer entries)
         cycle_time_avg = (
@@ -848,7 +851,8 @@ class LegoLeanEnv:
         self.revenue_total = revenue_total
         return {
             "sim_time_min": sim_time,
-            "throughput_per_min": throughput,
+            "throughput_per_hour": throughput_per_hour,
+            "throughput_per_day": throughput_per_day,
             "lead_time_avg_min": lead_time_avg,
             # 2026-01-21 Add Cycle Time KPI (avg time between finished units) for flow-performance comparison
             "cycle_time_avg_min": cycle_time_avg,
@@ -1461,12 +1465,12 @@ class LegoLeanEnv:
         # Compute throughput per minute since last sample (dt is already in minutes)
         dt = max(1e-9, at_t - self._last_sample_time)
         finished_delta = self.finished - self._last_sample_finished
-        throughput_per_min = finished_delta / dt  # dt is in minutes, so this gives units per minute
+        throughput_per_hour = (finished_delta / dt) * 60.0
         snap: Dict[str, Any] = {
             "t": round(at_t, 6),
             "wip": int(self.current_wip),
             "finished": int(self.finished),
-            "throughput_per_min": float(throughput_per_min),
+            "throughput_per_hour": float(throughput_per_hour),
         }
         # Buffer levels snapshot
         for b_id, buf in self.buffers.items():
@@ -1811,7 +1815,7 @@ CONFIG: Dict[str, Any] = {
             },
 
             # 库存持有成本: 年化综合成本按货值的 15-20% 计算，折算到每分钟
-            # (注: 代码中虽然 key 叫 _sec, 但实际逻辑是按分钟乘以面积计算的)
+            # (代码中虽然 key 叫 _sec, 但实际逻辑是按分钟乘以面积计算的)
             "holding_costs_per_buffer_sec": {
                 "A": 0.0005,  # 原材料仓库成本较低
                 "B": 0.0005,
