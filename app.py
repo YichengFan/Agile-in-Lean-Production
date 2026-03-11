@@ -79,12 +79,12 @@ with st.sidebar:
             min_value=0, max_value=30, value=int(float(cfg["parameters"].get("push_procurement_waste_rate", 0.05)) * 100)
         )
         # Auto-release is always enabled in push mode (forecast automatically triggers production)
-        margin_per_unit = st.number_input(
-            "Margin per unit",
-            min_value=0.0,
-            value=float(cfg["parameters"].get("cost", {}).get("margin_per_unit", 5600.0)),
-            step=100.0
-        )
+        # 2026-3-11margin_per_unit = st.number_input(
+        #     "Margin per unit",
+        #     min_value=0.0,
+        #     value=float(cfg["parameters"].get("cost", {}).get("margin_per_unit", 5600.0)),
+        #     step=100.0
+        # )
         cfg["parameters"]["push_demand_enabled"] = True
         cfg["parameters"]["push_demand_horizon_weeks"] = int(horizon_weeks)
         cfg["parameters"]["push_weekly_demand_mean"] = float(weekly_mean)
@@ -99,7 +99,7 @@ with st.sidebar:
         cfg["parameters"]["auto_release_conwip"] = False
         cfg["parameters"]["kanban_caps"] = {}
         cfg["parameters"].setdefault("cost", {})
-        cfg["parameters"]["cost"]["margin_per_unit"] = float(margin_per_unit)
+       # cfg["parameters"]["cost"]["margin_per_unit"] = float(margin_per_unit)
 # Calculate simulation time based on demand horizon in push mode
     if cfg["parameters"].get("push_demand_enabled", False):
         sim_time = int(horizon_weeks) * 5 * 8 * 60  # weeks * 5 days/week * 8 hours/day * 60 min/hour
@@ -196,6 +196,35 @@ sample_dt = st.number_input(
     help="Interval for logging time-series data to charts"
 )
 cfg["parameters"]["timeline_sample_dt_min"] = float(sample_dt)
+# --- 新增：全局财务参数 ---
+st.markdown("**Financial Parameters**")
+f1, f2 = st.columns(2)
+with f1:
+    unit_price = st.number_input(
+        "Unit Price (Revenue)",
+        min_value=0.0,
+        value=float(cfg["parameters"].get("cost", {}).get("unit_price", 10000.0)),
+        step=100.0,
+        help="Revenue per finished unit"
+    )
+with f2:
+    unit_material_cost = st.number_input(
+        "Unit Material Cost",
+        min_value=0.0,
+        value=float(cfg["parameters"].get("cost", {}).get("unit_material_cost", 4400.0)),
+        step=100.0,
+        help="Material cost per unit"
+    )
+
+# 自动计算 Margin 并在界面上提示
+calculated_margin = max(0.0, float(unit_price) - float(unit_material_cost))
+st.info(f"💡 Calculated Margin per unit: **{calculated_margin:.2f}**")
+
+# 写入全局配置
+cfg["parameters"].setdefault("cost", {})
+cfg["parameters"]["cost"]["unit_price"] = float(unit_price)
+cfg["parameters"]["cost"]["unit_material_cost"] = float(unit_material_cost)
+cfg["parameters"]["cost"]["margin_per_unit"] = float(calculated_margin)
 
 
 if enable_pull:
