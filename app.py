@@ -635,12 +635,9 @@ if st.button("Run Simulation"):
             elif actual_cycle > takt_target:
                 st.error(
                     "⚠️ **Too Slow!** The line cannot meet the customer takt. Check for bottlenecks (Blocking/Starvation) in diagnostics.")
-            elif actual_cycle < takt_target * 0.7:
-                st.warning(
-                    "⚠️ **Too Fast!** Producing much faster than required takt. This may cause overproduction waste if not strictly controlled by Kanban.")
             else:
                 st.success(
-                    "✅ **Perfect Pace!** Actual cycle time closely matches customer takt. The Lean flow is healthy.")
+                    "✅ **Takt Time meet!**")
 
     # 如果没有 Target Takt (Push 模式)
     else:
@@ -682,8 +679,8 @@ if st.button("Run Simulation"):
 
         cost_data = {
             "Category": [
-                "Effective Material",
-                "Effective Labor",
+                "Material Cost of Good Sold",
+                "Labor Cost",
                 "Inventory cost (Rent/Space)",
                 "⚠️ Overproduction Waste (Dead Stock)"
             ],
@@ -702,8 +699,8 @@ if st.button("Run Simulation"):
 
             # 给浪费分配一个醒目的红色
             color_discrete_map = {
-                "Effective Material": "#1f77b4",
-                "Effective Labor": "#9edae5",
+                "Material Cost of Good Sold": "#1f77b4",
+                "Labor Cost": "#9edae5",
                 "Holding (Rent/Space)": "#ff7f0e",
                 "⚠️ Overproduction Waste (Dead Stock)": "#d62728"
             }

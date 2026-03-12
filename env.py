@@ -411,6 +411,9 @@ class LegoLeanEnv:
         # Order tokens per release stage (how many jobs this release stage is allowed to start)
         self.stage_orders = {s_id: 0 for s_id in self.release_stage_ids}
 
+        # Total orders ever requested via enqueue_orders (used as "demand" for service level in pull mode)
+        self.total_orders_released = 0
+
         # FIFO queue of release timestamps (one per released unit) to compute lead times at completion
         self._release_times = deque()
 
@@ -513,6 +516,8 @@ class LegoLeanEnv:
         qty = int(qty)
         if qty <= 0:
             return
+
+        self.total_orders_released += qty
 
         # Determine model_id if not provided
         if model_id is None:
@@ -751,13 +756,15 @@ class LegoLeanEnv:
         # ----------------------------
         # Demand → Sales → Opportunity cost (UNMET demand only)
         # ----------------------------
-        # demand_total priority:
-        # 1) push plan realized demand (if available)
-        # 2) external demand cap demand_qty (for pull-mode experiments)
-        # 3) None/0 => no unmet-demand penalty
+        # demand_total: total customer "demand" (for service level = produced / demand_total)
+        # 1) Push: use realized demand from forecast
+        # 2) Pull: use total orders released (what was asked for)
+        # 3) Fallback: external demand_qty if set
         demand_total = 0
         if int(demand_realized_total) > 0:
             demand_total = int(demand_realized_total)
+        elif getattr(self, "total_orders_released", 0) > 0:
+            demand_total = int(self.total_orders_released)
         elif self.demand_qty is not None:
             demand_total = int(self.demand_qty)
 
@@ -1845,7 +1852,7 @@ CONFIG: Dict[str, Any] = {
         "push_weekly_demand_mean": 25,
         "push_forecast_noise_pct": 0.2,
         "push_realization_noise_pct": 0.1,
-        "push_procurement_waste_rate": 0.05,
+        "push_procurement_waste_rate": 0.15,
         "supplier_stage_ids": [],  # S1 should process materials normally (pull from A, output to B), not act as supplier
         "material_cost_mode": "procure_forecast",
     },
