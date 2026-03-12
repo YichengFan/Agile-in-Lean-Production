@@ -547,7 +547,9 @@ if st.button("Run Simulation"):
                 planned = planned_by_model.get(model_id, 0)
                 realized = realized_by_model.get(model_id, 0)
                 produced = finished_by_model.get(model_id, 0)
-                unmet = abs(realized - produced)
+                unmet_m = max(0, realized - produced)
+                overproduced_m = max(0, produced - realized)
+                total_difference = unmet_m + overproduced_m
 
                 if realized > produced:
                     status = "⚠️ Unmet"
@@ -561,7 +563,7 @@ if st.button("Run Simulation"):
                     "Planned": planned,
                     "Realized Demand": realized,
                     "Produced": produced,
-                    "Unmet Demand": unmet,
+                    "Total Difference": total_difference,
                     "Status": status
                 })
 
@@ -572,7 +574,12 @@ if st.button("Run Simulation"):
                 total_planned = kpis.get("planned_release_qty", 0)
                 total_realized = kpis.get("demand_realized_total", 0)
                 total_produced = kpis.get("finished_units", 0)
-                total_unmet = abs(total_realized - total_produced)
+                # Total difference = sum over models of (unmet + overproduced) per model
+                total_difference = sum(
+                    max(0, realized_by_model.get(m, 0) - finished_by_model.get(m, 0))
+                    + max(0, finished_by_model.get(m, 0) - realized_by_model.get(m, 0))
+                    for m in planned_by_model.keys()
+                )
 
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
@@ -582,8 +589,8 @@ if st.button("Run Simulation"):
                 with col3:
                     st.metric("Total Produced", total_produced)
                 with col4:
-                    st.metric("Unmet Demand", total_unmet,
-                              delta=f"{(total_unmet / total_realized * 100) if total_realized > 0 else 0:.1f}%",
+                    st.metric("Total Difference", total_difference,
+                              delta=f"{(total_difference / total_realized * 100) if total_realized > 0 else 0:.1f}%",
                               delta_color="inverse")
     # =====================================================================
     # 🌟 1. Executive Dashboard (Top Metrics)
