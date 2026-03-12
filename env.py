@@ -1465,12 +1465,15 @@ class LegoLeanEnv:
         # Compute throughput per minute since last sample (dt is already in minutes)
         dt = max(1e-9, at_t - self._last_sample_time)
         finished_delta = self.finished - self._last_sample_finished
-        throughput_per_hour = (finished_delta / dt) * 60.0
+        throughput_per_min = finished_delta / dt
+        throughput_per_hour = throughput_per_min * 60.0
+        throughput_per_day = throughput_per_min * 480.0  # 8-hour working day
         snap: Dict[str, Any] = {
             "t": round(at_t, 6),
             "wip": int(self.current_wip),
             "finished": int(self.finished),
             "throughput_per_hour": float(throughput_per_hour),
+            "throughput_per_day": float(throughput_per_day),
         }
         # Buffer levels snapshot
         for b_id, buf in self.buffers.items():

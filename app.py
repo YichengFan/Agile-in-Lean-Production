@@ -754,8 +754,17 @@ if st.button("Run Simulation"):
         st.markdown("**WIP and Finished Units**")
         st.line_chart(df[["wip", "finished"]], height=220)
 
-        st.markdown("**Throughput (units/hour)**")
-        st.line_chart(df[["throughput_per_hour"]], height=220)
+        # Throughput per day: x = day (1 unit = 480 min), y = units produced in that day
+        MIN_PER_DAY = 480.0  # 8-hour working day
+        df_day = df.copy()
+        df_day["day"] = (df_day.index / MIN_PER_DAY).astype(int)
+        daily = df_day.groupby("day").agg(
+            finished_first=("finished", "first"),
+            finished_last=("finished", "last"),
+        )
+        daily["throughput_per_day"] = daily["finished_last"] - daily["finished_first"]
+        st.markdown("**Throughput (units/day)**")
+        st.line_chart(daily[["throughput_per_day"]], height=220)
 
         buffer_cols = [c for c in ["B", "C1", "C2", "C3", "D1", "D2", "E"] if c in df.columns]
         if buffer_cols:
