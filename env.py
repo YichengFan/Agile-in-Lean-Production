@@ -1804,9 +1804,9 @@ CONFIG: Dict[str, Any] = {
         },
         # 2026-3-6 Cost and revenue settings (基于德国实际制造业情况校准)
         "cost": {
-            "unit_price": 1500.0,  # 成品售价 (例如高端 E-bike 或 精密组件)
-            "unit_material_cost": 900.0,  # 单件原材料成本 (约占售价 60%)
-            "margin_per_unit": 600.0,  # 边际贡献/毛利润 (1500 - 900，用于计算错失订单的机会损失)
+            "unit_price": 10000,  # 成品售价 (例如高端 E-bike 或 精密组件)
+            "unit_material_cost": 4400,  # 单件原材料成本 (约占售价 60%)
+            "margin_per_unit": 5600,  # 边际贡献/毛利润 (1500 - 900，用于计算错失订单的机会损失)
 
             # 人工成本: 按企业实际用工成本 15 欧元/小时计算 -> 15 / 60 = 0.25 欧元/分钟
             "labor_costs_per_team_min": {
