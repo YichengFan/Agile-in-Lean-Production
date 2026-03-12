@@ -411,8 +411,10 @@ class LegoLeanEnv:
         # Order tokens per release stage (how many jobs this release stage is allowed to start)
         self.stage_orders = {s_id: 0 for s_id in self.release_stage_ids}
 
-        # Total orders ever requested via enqueue_orders (used as "demand" for service level in pull mode)
+        # Total orders ever requested via enqueue_orders (includes CONWIP replenishment)
         self.total_orders_released = 0
+        # Orders initially requested (excl. closed-loop CONWIP replenishment); used as "demand" for service level in pull
+        self.initial_orders_released = 0
 
         # FIFO queue of release timestamps (one per released unit) to compute lead times at completion
         self._release_times = deque()
@@ -503,7 +505,7 @@ class LegoLeanEnv:
     # Public API
     # --------------------------------------------------------------------------
 
-    def enqueue_orders(self, qty: int = 1, model_id: Optional[str] = None):
+    def enqueue_orders(self, qty: int = 1, model_id: Optional[str] = None, is_replenishment: bool = False):
         """
         Release 'qty' orders into the system (CONWIP-aware).
         Adds order tokens to release stages (e.g., S1) and triggers try_start.
@@ -512,12 +514,16 @@ class LegoLeanEnv:
             qty: Number of orders to release
             model_id: Model type identifier (e.g., "m01", "m02", "m03", "m04").
                      If None, uses default model or first available model.
+            is_replenishment: If True, this call is from closed-loop CONWIP (backlog release).
+                             Do not count toward "demand" for service level (pull mode).
         """
         qty = int(qty)
         if qty <= 0:
             return
 
         self.total_orders_released += qty
+        if not is_replenishment:
+            self.initial_orders_released += qty
 
         # Determine model_id if not provided
         if model_id is None:
@@ -660,7 +666,7 @@ class LegoLeanEnv:
                     # 从积压池头部取出一个订单
                     next_model_id = self.order_backlog.popleft()
                     # 释放它进入生产线 (因为刚走了一个，所以肯定有空间，不会被拒绝)
-                    self.enqueue_orders(1, model_id=next_model_id)
+                    self.enqueue_orders(1, model_id=next_model_id, is_replenishment=True)
                 else:
                     # 积压池空了？那就停止生产。
                     # 这修复了“无限生产/过度生产”的问题。
@@ -758,11 +764,13 @@ class LegoLeanEnv:
         # ----------------------------
         # demand_total: total customer "demand" (for service level = produced / demand_total)
         # 1) Push: use realized demand from forecast
-        # 2) Pull: use total orders released (what was asked for)
+        # 2) Pull: use initial orders only (what user asked for), not CONWIP replenishment
         # 3) Fallback: external demand_qty if set
         demand_total = 0
         if int(demand_realized_total) > 0:
             demand_total = int(demand_realized_total)
+        elif getattr(self, "initial_orders_released", 0) > 0:
+            demand_total = int(self.initial_orders_released)
         elif getattr(self, "total_orders_released", 0) > 0:
             demand_total = int(self.total_orders_released)
         elif self.demand_qty is not None:
