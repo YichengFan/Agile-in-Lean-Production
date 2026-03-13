@@ -57,10 +57,9 @@ This document focuses on the **simulation model** implementation details and cur
 10. [Simulation Assumptions](#10-simulation-assumptions)  
 11. [Key Features](#11-key-features)  
 12. [Usage Examples](#12-usage-examples)  
-13. [Future Work](#13-future-work--todos)  
-14. [File Structure](#14-file-structure)  
-15. [Getting Help](#15-getting-help)  
-16. [Validation Targets](#16-validation-targets)
+13. [File Structure](#14-file-structure)  
+14. [Getting Help](#15-getting-help)  
+15. [Validation Targets](#16-validation-targets)
 
 ---
 
@@ -605,11 +604,7 @@ for model_id in planned.keys():
 
 ---
 
-## 13) Future Work / TODOs
-
-
-
-## 14) File Structure
+## 13) File Structure
 
 ```
 Agile-in-Lean-Production/
@@ -625,7 +620,7 @@ Agile-in-Lean-Production/
 
 ---
 
-## 15) Getting Help
+## 14) Getting Help
 
 - **Multi-model configuration and usage**: [MULTI_MODEL_GUIDE.md](MULTI_MODEL_GUIDE.md) — model definitions, BOM examples, demand forecasting with multiple models, troubleshooting
 - **Mathematical model**: [mathematical_model.md](mathematical_model.md) — objective, constraints, cost formulations
@@ -633,7 +628,7 @@ Agile-in-Lean-Production/
 
 ---
 
-## 16) Validation Targets
+## 15) Validation Targets
 
 - **Little's Law**: L̄ = θ · W̄ (should hold within simulation error)
 - **Utilization**: ρ<sub>i</sub> < 0.85 for all stages (avoid bottlenecks)
