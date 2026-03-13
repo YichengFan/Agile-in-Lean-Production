@@ -11,7 +11,7 @@
 # - Multi-input Stage support (e.g., Final Assembly needs D1 + D2 + C3)
 # - Single-output buffer OR probabilistic output routing (e.g., Set Sorting -> C1/C2/C3)
 # - Shift schedules (optional), random disruptions, defects & rework
-# - Time distributions: constant, normal, lognormal, triangular, uniform, exponential
+# - Processing time: constant (base_time / sqrt(workers) per stage)
 # - KPIs: throughput/sec, average lead time, average WIP, team utilization, finished count
 # - “Click to play”: step(), run_for(dt), run_until(t_stop) and a minimal example at bottom
 #
@@ -29,54 +29,6 @@ import random
 import math
 from collections import deque  # Used to track order release times for lead-time calculation
 
-
-
-# ==============================================================================
-# Utility helpers
-# ==============================================================================
-
-def sample_time(dist: Dict[str, Any], base: float) -> float:
-    """
-    Sample a processing time given a distribution descriptor.
-    Supported dist['type']: 'constant', 'normal', 'lognormal', 'triangular',
-                            'uniform', 'exponential'.
-    Fallback is 'constant' with the given base time.
-    """
-    if not dist:
-        return max(0.0, float(base))
-    t = (dist.get("type") or "constant").lower()
-    p1, p2, p3 = dist.get("p1"), dist.get("p2"), dist.get("p3")
-
-    if t == "constant":
-        return max(0.0, float(base))
-
-    if t == "normal":
-        mu = float(p1) if p1 is not None else float(base)
-        sigma = float(p2) if p2 is not None else max(1e-9, 0.1 * mu)
-        return max(0.0, random.gauss(mu, sigma))
-
-    if t == "lognormal":
-        mu = float(p1) if p1 is not None else math.log(max(1e-6, base))
-        sigma = float(p2) if p2 is not None else 0.25
-        return max(0.0, random.lognormvariate(mu, sigma))
-
-    if t == "triangular":
-        low = float(p1) if p1 is not None else 0.5 * base
-        mode = float(p2) if p2 is not None else base
-        high = float(p3) if p3 is not None else 1.5 * base
-        return max(0.0, random.triangular(low, high, mode))
-
-    if t == "uniform":
-        a = float(p1) if p1 is not None else 0.8 * base
-        b = float(p2) if p2 is not None else 1.2 * base
-        return max(0.0, random.uniform(a, b))
-
-    if t == "exponential":
-        lam = 1.0 / float(base) if base else 1.0
-        return max(0.0, random.expovariate(lam))
-
-    # Fallback to constant
-    return max(0.0, float(base))
 
 
 # ==============================================================================
@@ -164,8 +116,8 @@ class Stage:
     
     Time Calculation:
     - base_process_time_min: Base time to complete this stage's work in minutes (user-defined, independent of material count)
-    - Worker efficiency: effective_time = base_time / sqrt(workers) (deterministic, models diminishing returns)
-    - Distribution: ptime ~ Distribution(effective_time) (adds variability)
+    - Worker efficiency: effective_time = base_time / sqrt(workers) (deterministic)
+    - Processing time is constant: ptime = effective_time
     - Transport: final_time = ptime + transport_time_min
     """
     stage_id: Any
@@ -178,7 +130,6 @@ class Stage:
     output_buffers_by_model: Dict[str, Dict[str, Dict[str, int]]] = field(default_factory=dict)  # model_id -> {buffer_id: {item_id: qty}}
 
     base_process_time_min: float = 1.0
-    time_distribution: Dict[str, Any] = field(default_factory=dict)
     transport_time_min: float = 0.0
     #dic to save the time from s2 to c1,c2,c3
     transport_time_to_outputs_min: dict = field(default_factory=dict)
@@ -264,7 +215,6 @@ class LegoLeanEnv:
                 output_buffers=s.get("output_buffers") or {},
                 output_buffers_by_model=s.get("output_buffers_by_model") or {},
                 base_process_time_min=float(s.get("base_process_time_min") or s.get("base_process_time_sec", 1.0) / 60.0),  # Support both old and new names, convert sec to min
-                time_distribution=s.get("time_distribution") or {},
                 transport_time_min=float(s.get("transport_time_min") or s.get("transport_time_sec", 0.0) / 60.0),  # Support both old and new names, convert sec to min
                 transport_time_to_outputs_min={k: float(v) / 60.0 if isinstance(v, (int, float)) else v for k, v in (s.get("transport_time_to_outputs_min") or s.get("transport_time_to_outputs_sec", {})).items()},
                 defect_rate=float(s.get("defect_rate") or 0.0),
@@ -826,12 +776,12 @@ class LegoLeanEnv:
         # 买进来的总数 (procured_qty) 减去真正卖掉的 (sales_units)，剩下的全是多余的废料
         if self.push_demand_enabled:
             excess_raw = max(0, self.procured_qty - sales_units)
-            h_A = self.holding_costs_per_buffer.get("A", 0.0005)
+            h_A = self.holding_costs_per_buffer.get("A")
             inventory_cost += excess_raw * sim_time * h_A
 
         # 3. Push 模式的惩罚二：卖不出去的成品呆滞库存 (这就完全符合你的直觉了！)
         # 只有过量生产的 (overproduced_units) 才会压在手里交高昂的仓储费
-        h_E = self.holding_costs_per_buffer.get("E", 0.0025)
+        h_E = self.holding_costs_per_buffer.get("E")
         if overproduced_units > 0:
             # 假设这些滞销品平均在仓库里放了一半的模拟时间
             inventory_cost += overproduced_units * (sim_time / 2) * h_E
@@ -1199,11 +1149,9 @@ class LegoLeanEnv:
         # Step 1: Get base time (user-defined, independent of material count)
         base_time = stage.base_process_time_min
 
-        # Step 2: Apply deterministic worker efficiency (square root function)
+        # Step 2: Apply deterministic worker efficiency (square root function); processing time is constant
         effective_time = self._apply_worker_efficiency(base_time, stage.workers)
-
-        # Step 3: Sample from distribution (this adds variability)
-        ptime = sample_time(stage.time_distribution, effective_time)
+        ptime = max(0.0, float(effective_time))
 
         # Assign a job_id to this completion (needed if we split into multiple deliveries)
         self._job_seq += 1
@@ -1623,7 +1571,6 @@ CONFIG: Dict[str, Any] = {
                 "x01": 3, "x02": 4, "x03": 1, "x04": 1}}  # Icomat_2000X - output to buffer "B"
             },
             "base_process_time_min": 30.0,  # 30 minutes base time
-            "time_distribution": {"type": "triangular", "p1": 20.0, "p2": 30.0, "p3": 45.0},  # minutes
             "transport_time_min": 3.0,  # 3 minutes transport
             "defect_rate": 0.0,
             "rework_stage_id": "S1",
@@ -1679,7 +1626,6 @@ CONFIG: Dict[str, Any] = {
                 "m04": {"C1": {"buna04": 1}, "C2": {"bunc04": 1}, "C3": {"bunf04": 1}}
             },
             "base_process_time_min": 30.0,  # 30 minutes base time
-            "time_distribution": {"type": "triangular", "p1": 20.0, "p2": 30.0, "p3": 45.0},  # minutes
             "transport_time_min": 3.0,  # 3 minutes transport
             "defect_rate": 0.0,
             "rework_stage_id": "S2",
@@ -1707,7 +1653,6 @@ CONFIG: Dict[str, Any] = {
                 "m04": {"D1": {"saa01": 1}}   # Icomat_2000X
             },
             "base_process_time_min": 60.0,  # 60 minutes (1 hour) base time
-            "time_distribution": {"type": "triangular", "p1": 45.0, "p2": 60.0, "p3": 80.0},  # minutes
             "transport_time_min": 4.0,  # 4 minutes transport
             "defect_rate": 0.0,
             "rework_stage_id": "S3",
@@ -1735,7 +1680,6 @@ CONFIG: Dict[str, Any] = {
                 "m04": {"D2": {"sac02": 1}}   # Icomat_2000X
             },
             "base_process_time_min": 90.0,  # 90 minutes (1.5 hours) base time
-            "time_distribution": {"type": "triangular", "p1": 70.0, "p2": 90.0, "p3": 120.0},  # minutes
             "transport_time_min": 4.0,  # 4 minutes transport
             "defect_rate": 0.0,
             "rework_stage_id": "S4",
@@ -1763,7 +1707,6 @@ CONFIG: Dict[str, Any] = {
                 "m04": {"E": {"fg04": 1}}    # Icomat_2000X
             },
             "base_process_time_min": 120.0,  # 120 minutes (2 hours) base time
-            "time_distribution": {"type": "triangular", "p1": 90.0, "p2": 120.0, "p3": 150.0},  # minutes
             "transport_time_min": 5.0,  # 5 minutes transport
             "defect_rate": 0.0,
             "rework_stage_id": "S5",
@@ -1817,7 +1760,6 @@ CONFIG: Dict[str, Any] = {
             "m02": 0.10,  # Gliderlinski 10%
             "m04": 0.10   # Icomat_2000X 10%
         },
-        # 2026-3-6 Cost and revenue settings (基于德国实际制造业情况校准)
         "cost": {
             "unit_price": 10000,  # 成品售价 (例如高端 E-bike 或 精密组件)
             "unit_material_cost": 4400,  # 单件原材料成本 (约占售价 60%)
@@ -1832,17 +1774,16 @@ CONFIG: Dict[str, Any] = {
                 "T5": 0.25
             },
 
-            # 库存持有成本: 年化综合成本按货值的 15-20% 计算，折算到每分钟
-            # (代码中虽然 key 叫 _sec, 但实际逻辑是按分钟乘以面积计算的)
+
             "holding_costs_per_buffer_sec": {
-                "A": 0.0005,  # 原材料仓库成本较低
-                "B": 0.0005,
-                "C1": 0.0010,  # WIP 在制品占用资金和车间空间，成本翻倍
-                "C2": 0.0010,
-                "C3": 0.0010,
-                "D1": 0.0015,  # 半成品价值更高
-                "D2": 0.0015,
-                "E": 0.0025  # 成品仓储及资金占用成本最高
+                "A": 0.0100,
+                "B": 0.0010,
+                "C1": 0.0130,
+                "C2": 0.0210,
+                "C3": 0.0100,
+                "D1": 0.2600,
+                "D2": 0.4200,
+                "E": 0.7600
             },
             "demand_qty": None  # 可选：销售数量上限
         },

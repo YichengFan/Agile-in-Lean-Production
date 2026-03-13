@@ -333,10 +333,10 @@ exp = st.expander("Per-stage timing, transport, defects", expanded=False)
 def stage_controls(label: str, sid: str):
     st.markdown(f"**{label} ({sid})**")
     s = stage_by_id(cfg, sid)
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         base = st.number_input(
-            f"{sid} base_time/worker (min)",
+            f"{sid} base time (min)",
             min_value=0.0,
             value=float(s.get("base_process_time_min", s.get("base_process_time_sec", 1.0) / 60.0)),
             step=0.5,
@@ -353,42 +353,6 @@ def stage_controls(label: str, sid: str):
         )
         s["workers"] = int(workers)
     with c3:
-        dist = st.selectbox(
-            f"{sid} dist.type",
-            options=["constant", "triangular", "normal", "uniform", "lognormal", "exponential"],
-            index=0,
-            key=f"{sid}_dist"
-        )
-        if "time_distribution" not in s or s.get("time_distribution") is None:
-            s["time_distribution"] = {}
-        s["time_distribution"]["type"] = dist
-    with c4:
-        p1 = st.number_input(
-            f"{sid} p1",
-            value=float(s["time_distribution"].get("p1") or (base * 0.5 if dist == "triangular" else base)),
-            step=0.5,
-            key=f"{sid}_p1"
-        )
-        s["time_distribution"]["p1"] = float(p1)
-    with c5:
-        p2 = st.number_input(
-            f"{sid} p2",
-            value=float(s["time_distribution"].get("p2") or (base if dist == "triangular" else base * 0.1)),
-            step=0.5,
-            key=f"{sid}_p2"
-        )
-        s["time_distribution"]["p2"] = float(p2)
-
-    e1, e2, e3 = st.columns(3)
-    with e1:
-        p3 = st.number_input(
-            f"{sid} p3",
-            value=float(s["time_distribution"].get("p3") or (base * 1.5 if dist == "triangular" else 0.0)),
-            step=0.5,
-            key=f"{sid}_p3"
-        )
-        s["time_distribution"]["p3"] = float(p3)
-    with e2:
         trans = st.number_input(
             f"{sid} transport (min)",
             min_value=0.0,
@@ -397,7 +361,7 @@ def stage_controls(label: str, sid: str):
             key=f"{sid}_tt"
         )
         s["transport_time_min"] = float(trans)
-    with e3:
+    with c4:
         defect = st.number_input(
             f"{sid} defect rate",
             min_value=0.0,
