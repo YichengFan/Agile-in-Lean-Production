@@ -607,41 +607,7 @@ for model_id in planned.keys():
 
 ## 13) Future Work / TODOs
 
-The following improvements are planned:
 
-### 1. Pull Mode Enhancements
-- **Current status**: Pull mode (CONWIP + Kanban) and Order Release Configuration are implemented and used when “Enable Pull” is ticked
-- **Possible enhancements**: Additional CONWIP/Kanban policies, more release-stage options, validation of Little’s Law under CONWIP
-
-### 2. Adjust Time System
-- **Current status**: Time is in minutes, but may need further adjustments
-- **Potential improvements**:
-  - Consider different time scales for different operations
-
-### 3. Add Adjustable Forecast Probability
-- **Current status**: Model probabilities are fixed in CONFIG
-- **Enhancement needed**:
-  - Add UI controls for adjusting model demand probabilities
-  - Allow dynamic probability changes during simulation
-  - Support time-varying demand patterns
-
-### 4. KPI Testing
-- **Current status**: KPIs are calculated but need validation
-- **Testing needed**:
-  - Validate KPI calculations against analytical models
-  - Test Little's Law: L̄ = θ · W̄
-  - Verify per-model KPI accuracy
-  - Test unmet demand and overproduction calculations
-  - Validate cost accounting accuracy
-
-### Additional Potential Improvements
-
-- **Advanced forecasting**: Add more sophisticated demand forecasting models
-- **Optimization integration**: Connect simulation with optimization algorithms
-- **Visualization enhancements**: Improve KPI charts and time series displays
-- **Export functionality**: Add CSV/Excel export for KPI data
-
----
 
 ## 14) File Structure
 
