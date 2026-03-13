@@ -1,5 +1,11 @@
 # LEGO Lean Production — Simulation Model (Current Version)
 
+**Purpose:** This document is the **authoritative specification** of the discrete-event simulation (DES): system structure, Push/Pull modes, event logic, parameters, KPIs, and configuration. It is intended for readers who need to understand, validate, or extend the simulator.
+
+**Related docs:** Multi-model configuration and usage → [MULTI_MODEL_GUIDE.md](MULTI_MODEL_GUIDE.md). Mathematical formulation → [mathematical_model.md](mathematical_model.md).
+
+---
+
 ## Quick Start
 
 1) Install dependencies
@@ -34,6 +40,27 @@ python env.py
 For the **mathematical model** (objective function, decision variables, constraints, cost formulations), please refer to [`mathematical_model.md`](mathematical_model.md).
 
 This document focuses on the **simulation model** implementation details and current system capabilities.
+
+---
+
+## Table of Contents
+
+1. [System Overview](#1-system-overview)  
+2. [Sets, Indices, Graph](#2-sets-indices-graph)  
+3. [Parameters](#3-parameters)  
+4. [Demand Forecasting System](#4-demand-forecasting-system)  
+5. [State Variables](#5-state-variables)  
+6. [Event Logic](#6-event-logic)  
+7. [KPIs](#7-kpis)  
+8. [Configuration](#8-configuration)  
+9. [Simulation Implementation Mapping](#9-simulation-implementation-mapping)  
+10. [Simulation Assumptions](#10-simulation-assumptions)  
+11. [Key Features](#11-key-features)  
+12. [Usage Examples](#12-usage-examples)  
+13. [Future Work](#13-future-work--todos)  
+14. [File Structure](#14-file-structure)  
+15. [Getting Help](#15-getting-help)  
+16. [Validation Targets](#16-validation-targets)
 
 ---
 
@@ -96,9 +123,7 @@ The system implements a **dual-mode production simulator** (Push and Pull) with 
 - **Base processing time** at stage *i*: τ<sub>i</sub> > 0 (minutes)
 - **Number of workers** at stage *i*: w<sub>i</sub> ∈ ℕ<sup>+</sup>
 - **Effective processing time**: τ<sub>i</sub> / √w<sub>i</sub> (deterministic square root efficiency)
-- **Transport time**: δ<sub>i</sub> ≥ 0 (minutes)
-- **Time distribution**: D<sub>i</sub> = (type, p<sub>i1</sub>, p<sub>i2</sub>, p<sub>i3</sub>)
-  - Supported types: constant, normal, lognormal, triangular, uniform, exponential
+- **Transport time**: δ<sub>i</sub> ≥ 0 (minutes), constant per stage (and per-output for S2→C1/C2/C3)
 
 ### Worker Efficiency
 
@@ -123,7 +148,7 @@ This means:
 - **Demand horizon**: H weeks (default: 3 weeks)
 - **Weekly demand mean**: μ<sub>weekly</sub> (total units per week)
 - **Model demand probabilities**: P(m01), P(m02), P(m03), P(m04)
-  - Default: m01=60%, m02=20%, m03=10%, m04=10%
+  - Default: m01=60%, m02=10%, m03=20%, m04=10%
 - **Forecast noise**: ε<sub>f</sub> ∈ [0, 1] (percentage applied to forecast generation)
 - **Realization noise**: ε<sub>r</sub> ∈ [0, 1] (percentage applied to actual demand)
 - **Procurement waste rate**: w ∈ [0, 1] (safety stock/waste percentage)
@@ -147,7 +172,7 @@ This means:
 ### Other Parameters
 
 - **Buffer capacity**: cap<sub>b</sub> ∈ ℕ ∪ {∞}
-- **Shift schedule**: Currently disabled (24/7 production)
+- **Production schedule**: 24/7 (no shift windows; simulation runs continuously)
 
 ---
 
@@ -238,7 +263,7 @@ A stage i can start only if all of the following hold:
 If all checks pass:
 - Pull BOM items from buffers (model-specific)
 - Set Y<sub>i</sub>(t) = 1
-- Calculate processing time: `base_time / √workers` + sample from distribution
+- Calculate processing time: `base_time / √workers`
 - Schedule `complete` event at t + S<sub>i</sub> with **`is_rework`** set from the try_start payload (fresh vs rework)
 
 ### Completion at Stage i
@@ -320,12 +345,12 @@ CONFIG = {
     "parameters": {
         "push_demand_enabled": True,
         "push_demand_horizon_weeks": 3,
-        "push_weekly_demand_mean": 30,
-        "push_forecast_noise_pct": 0.1,
-        "push_realization_noise_pct": 0.05,
-        "push_procurement_waste_rate": 0.05,
+        "push_weekly_demand_mean": 25,
+        "push_forecast_noise_pct": 0.2,
+        "push_realization_noise_pct": 0.1,
+        "push_procurement_waste_rate": 0.15,
         "model_demand_probabilities": {
-            "m01": 0.6, "m02": 0.2, "m03": 0.1, "m04": 0.1
+            "m01": 0.6, "m02": 0.1, "m03": 0.2, "m04": 0.1
         },
         ...
     }
@@ -358,9 +383,9 @@ The Streamlit UI allows:
 - **Mode**: Enable Pull (checkbox) — Pull shows Order Release Configuration and CONWIP/Kanban; Push shows demand horizon, forecast/noise, margin
 - **Order Release Configuration**: visible only when Pull is enabled; quantity per model (m01–m04, etc.)
 - **Simulation time**: in Pull mode user-defined (minutes); in Push mode derived from demand horizon
-- **Global parameters**: target takt, timeline sample Δt
+- **Global parameters**: timeline sample Δt (min) for charts. *Target takt* is not in CONFIG; in Pull mode the UI computes it as simulation time ÷ total orders and uses it only for the Flow Pacing comparison (Target vs Actual cycle time).
 - **Pull controls** (when Pull enabled): CONWIP WIP cap, closed-loop CONWIP, release stage(s), Kanban caps
-- **Processing & Quality** (expander): per-stage base time, workers, time distribution, transport, defect rate
+- **Processing & Quality** (expander): per-stage base time, workers, transport, defect rate
 - **Initial buffer stocks**: JSON per buffer
 - **Random seed**: optional for reproducibility
 
@@ -370,10 +395,10 @@ The Streamlit UI allows:
 
 | Simulation Element | `env.py` Implementation |
 |-------------------|------------------------|
-| τ<sub>i</sub>, D<sub>i</sub> | `base_process_time_min`, `time_distribution` |
+| τ<sub>i</sub> (processing time) | `base_process_time_min` with deterministic worker efficiency |
 | w<sub>i</sub> | `workers` |
 | Effective time | `base_time / √workers` (deterministic) |
-| δ<sub>i</sub> | `transport_time_min` |
+| δ<sub>i</sub> | `transport_time_min` (or `transport_time_to_outputs_min` for S2 → C1/C2/C3) |
 | q<sub>i</sub> | `defect_rate` (default: 0.0) |
 | Rework stage | `rework_stage_id` (per stage; often same stage) |
 | Fresh vs rework | `is_rework` on try_start/complete payloads; rework bypasses token gating |
@@ -386,7 +411,7 @@ The Streamlit UI allows:
 | Lead time tracking | `self._release_times` (deque) |
 | Finished per model | `self.finished_goods_by_model` |
 | Planned per model | `self.planned_release_qty` |
-| Realized per model | `self.demand_realized` |
+| Realized per model | `self.realized_demand_total` |
 
 ---
 
@@ -432,8 +457,97 @@ The Streamlit UI allows:
 
 - Time in minutes (not seconds)
 - Deterministic worker efficiency (√workers)
-- Configurable time distributions (constant, normal, triangular, etc.)
+- Constant processing time per stage: effective_time = base_time / √workers (no random distributions)
 - Transport times per stage (and per-output for S2 → C1/C2/C3)
+
+### Fixed Configuration Parameters (env.py only)
+
+These parameters are defined in `env.py` in the `CONFIG` dict. Values in the tables below are the defaults; many are overridable via the UI. To change any value that has no UI control, edit `env.py` directly.
+
+#### Structural and control (CONFIG / parameters)
+
+| Parameter | Value | Note |
+|-----------|--------|------|
+| `parameters.default_model_id` | `"m01"` | Default model when not specified |
+| `parameters.timeline_sample_dt_min` | `5.0` | Timeline sampling interval (min) |
+| `parameters.finished_buffer_ids` | `["E"]` | Buffers that count as finished goods |
+| `parameters.release_stage_ids` | `["S1"]` (if omitted) | Token-gated release stages; UI assumes S1 |
+| `parameters.supplier_stage_ids` | `[]` | Supplier stages (empty = S1 pulls from A normally) |
+| `parameters.material_cost_mode` | `"procure_forecast"` | How material cost is computed (push) |
+
+#### Models (CONFIG.models)
+
+| Parameter | Value |
+|-----------|--------|
+| `models.m01.name` | Sly_Slider |
+| `models.m02.name` | Gliderlinski |
+| `models.m03.name` | Icky_Ice_Glider |
+| `models.m04.name` | Icomat_2000X |
+
+#### Model demand probabilities (push forecast allocation)
+
+| Parameter | Value |
+|-----------|--------|
+| `parameters.model_demand_probabilities.m01` | 0.60 |
+| `parameters.model_demand_probabilities.m02` | 0.10 |
+| `parameters.model_demand_probabilities.m03` | 0.20 |
+| `parameters.model_demand_probabilities.m04` | 0.10 |
+
+#### Cost (parameters.cost)
+
+| Parameter | Value |
+|-----------|--------|
+| `cost.unit_price` | 10000 |
+| `cost.unit_material_cost` | 4400 |
+| `cost.margin_per_unit` | 5600 |
+| `cost.labor_costs_per_team_min.T1` | 0.25 |
+| `cost.labor_costs_per_team_min.T2` | 0.25 |
+| `cost.labor_costs_per_team_min.T3` | 0.25 |
+| `cost.labor_costs_per_team_min.T4` | 0.25 |
+| `cost.labor_costs_per_team_min.T5` | 0.25 |
+| `cost.holding_costs_per_buffer_min.A` | 0.0100 |
+| `cost.holding_costs_per_buffer_min.B` | 0.0010 |
+| `cost.holding_costs_per_buffer_min.C1` | 0.0130 |
+| `cost.holding_costs_per_buffer_min.C2` | 0.0210 |
+| `cost.holding_costs_per_buffer_min.C3` | 0.0100 |
+| `cost.holding_costs_per_buffer_min.D1` | 0.2600 |
+| `cost.holding_costs_per_buffer_min.D2` | 0.4200 |
+| `cost.holding_costs_per_buffer_min.E` | 0.7600 |
+| `cost.demand_qty` | None |
+
+#### Pull / CONWIP defaults (parameters; UI can override)
+
+| Parameter | Value |
+|-----------|--------|
+| `parameters.conwip_wip_cap` | 12 |
+| `parameters.auto_release_conwip` | True |
+| `parameters.kanban_caps.C3` | 4 |
+| `parameters.kanban_caps.D1` | 4 |
+| `parameters.kanban_caps.D2` | 4 |
+
+#### Push demand defaults (parameters; UI can override)
+
+| Parameter | Value |
+|-----------|--------|
+| `parameters.push_demand_enabled` | True |
+| `parameters.push_auto_release` | False |
+| `parameters.push_demand_horizon_weeks` | 3 |
+| `parameters.push_weekly_demand_mean` | 25 |
+| `parameters.push_forecast_noise_pct` | 0.2 |
+| `parameters.push_realization_noise_pct` | 0.1 |
+| `parameters.push_procurement_waste_rate` | 0.15 |
+
+#### Per-stage defaults (CONFIG.stages; UI can override base time, workers, transport, defect)
+
+| Stage | base_process_time_min | transport_time_min | workers | rework_stage_id | defect_rate |
+|-------|------------------------|--------------------|---------|------------------|-------------|
+| S1 | 30.0 | 3.0 | 2 | S1 | 0.0 |
+| S2 | 30.0 | 3.0 | 2 | S2 | 0.0 |
+| S3 | 60.0 | 4.0 | 2 | S3 | 0.0 |
+| S4 | 90.0 | 4.0 | 2 | S4 | 0.0 |
+| S5 | 120.0 | 5.0 | 2 | S5 | 0.0 |
+
+**Note:** Stage graph (S1→B→S2→C1/C2/C3→S3/S4/S5→E), buffer IDs, and model-specific BOMs/outputs are fixed in `CONFIG`; see `env.py` for full structure.
 
 ### KPI Tracking
 
@@ -503,8 +617,6 @@ The following improvements are planned:
 - **Current status**: Time is in minutes, but may need further adjustments
 - **Potential improvements**:
   - Consider different time scales for different operations
-  - Add time-based shift scheduling (currently disabled)
-  - Optimize time distribution parameters
 
 ### 3. Add Adjustable Forecast Probability
 - **Current status**: Model probabilities are fixed in CONFIG
@@ -524,7 +636,6 @@ The following improvements are planned:
 
 ### Additional Potential Improvements
 
-- **Shift scheduling**: Re-enable and test shift-based production
 - **Advanced forecasting**: Add more sophisticated demand forecasting models
 - **Optimization integration**: Connect simulation with optimization algorithms
 - **Visualization enhancements**: Improve KPI charts and time series displays
@@ -550,9 +661,9 @@ Agile-in-Lean-Production/
 
 ## 15) Getting Help
 
-- **Multi-model production**: See [`MULTI_MODEL_GUIDE.md`](MULTI_MODEL_GUIDE.md) for detailed examples
-- **Mathematical model**: See [`mathematical_model.md`](mathematical_model.md) for optimization formulation
-- **Code documentation**: See inline comments in `env.py` and `app.py`
+- **Multi-model configuration and usage**: [MULTI_MODEL_GUIDE.md](MULTI_MODEL_GUIDE.md) — model definitions, BOM examples, demand forecasting with multiple models, troubleshooting
+- **Mathematical model**: [mathematical_model.md](mathematical_model.md) — objective, constraints, cost formulations
+- **Code**: Inline comments in `env.py` and `app.py`
 
 ---
 
@@ -565,5 +676,16 @@ Agile-in-Lean-Production/
 
 ---
 
-**Last Updated**: 2026-03-05  
+## Summary (key takeaways)
+
+- **Dual mode**: Push (forecast-based release) or Pull (token-gated + CONWIP + Kanban); same DES engine and BOM/defect logic.
+- **Time**: Simulation in **minutes**; processing time = base_time / √workers (constant); 24/7 production.
+- **Multi-model**: Four product models (m01–m04); model-specific BOMs and outputs; FIFO order queue; see [MULTI_MODEL_GUIDE.md](MULTI_MODEL_GUIDE.md) for configuration.
+- **Defect/rework**: Per-stage defect_rate and rework_stage_id; one rework per job, then scrap; rework bypasses token gating.
+- **KPIs**: Throughput, WIP, lead time, service level, per-model planned/realized/produced, unmet/overproduced, cost and profit.
+- **Configuration**: Single source in `env.py` CONFIG; UI overrides for mode, Order Release (Pull), CONWIP/Kanban, stage times, and buffer stocks. Target takt is not in CONFIG; the UI computes it in Pull mode (simulation time ÷ total orders) for the Flow Pacing display only.
+
+---
+
+**Last updated**: 2026-03-13  
 **Version**: 2.1 (Push/Pull dual mode, defect/rework with `is_rework`, Order Release only in Pull)

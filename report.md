@@ -58,21 +58,10 @@ These are configuration-level knobs in `env.py`’s `CONFIG["parameters"]` that 
 
 | Parameter                | Default Value | Description |
 |--------------------------|---------------|-------------|
-| `target_takt_sec`        | `10.0`        | Target takt time (seconds per finished unit). Used as a reference only; the engine does not enforce it. |
-| `timeline_sample_dt_sec` | `5.0`         | Sampling interval (seconds) for recording the time series `env.timeline` used in Streamlit charts. |
+| `timeline_sample_dt_min` | `5.0`         | Sampling interval (minutes) for recording the time series `env.timeline` used in Streamlit charts. |
 | `finished_buffer_ids`    | `["E"]`       | List of buffer IDs that count as **finished product**. When a job is pushed into any of these buffers, `finished_units` increments. |
 | `routing_mode`           | `"random"`    | Routing mode for stages with `output_rules` (currently S₂). `"random"` uses probabilistic routing each job; `"deterministic"` balances long-run counts to match the target split. |
 
-
-### Shift Schedule (`shift_schedule`)
-
-| Parameter      | Default Value | Description |
-|----------------|---------------|-------------|
-| `shift_id`     | `"day"`       | Identifier for the shift (referenced by teams). |
-| `start_minute` | `480`         | Start time in minutes from midnight (480 = 08:00). |
-| `end_minute`   | `960`         | End time in minutes from midnight (960 = 16:00). |
-
-Shifts repeat every 24 hours. If the current simulation time is outside any shift, processing is paused and events are postponed to the next shift start.
 
 ### Random Disruptions (`random_events`)
 
@@ -261,66 +250,46 @@ This KPI will be implemented in the next development stage.
 
 | Model Element | env.py Mapping |
 |----------------|----------------|
-| τ<sub>i</sub>, D<sub>i</sub> | `base_process_time_sec`, `time_distribution` |
+| τ<sub>i</sub> | `base_process_time_min` (effective time = τ/√workers, constant) |
 | w<sub>i</sub> | `workers` |
-| δ<sub>i</sub> | `transport_time_sec` |
-| q<sub>i</sub>, r(i) | `defect_rate`, `rework_stage_id` |
-| P<sub>routing</sub> | `output_rules` (e.g. S2→C1/C2/C3) |
-| Multi-input | `input_buffers=["D1","D2","C3"]` |
-| α(t) | `shift_schedule` |
-| π<sub>miss</sub>, m | `random_events` |
-| K | `parameters.conwip_cap` |
+| δ<sub>i</sub> | `transport_time_min` (or `transport_time_to_outputs_min` for S2→C1/C2/C3) |
+| q<sub>i</sub>, r(i) | `defect_rate`, `rework_stage_id` (π<sub>miss</sub>/random_events not in current sim) |
+| P<sub>routing</sub> | `output_buffers_by_model` (S2→C1/C2/C3 per model) |
+| Multi-input | `input_buffers` (e.g. S5: ["C3","D1","D2"]) |
+| K | `parameters.conwip_wip_cap` |
 
 ---
 ## 8) Model Assumptions (as implemented)
 
 At the level of this project we rely on a few key simplifications:
 
-1. **Push strategy (no CONWIP loop)**  
-   - Orders are released using a **pure push** policy: the UI calls `enqueue_orders(qty)` to inject a batch of jobs into the system.  
-   - The theoretical CONWIP WIP cap \(K\) and λ-based release are not active in the current implementation.
+1. **Push and Pull modes**  
+   - **Push**: Orders are released from demand forecast at simulation start; no CONWIP cap.  
+   - **Pull**: User sets Order Release (quantity per model); CONWIP WIP cap \(K\) and closed-loop auto-release are implemented. When “Enable Pull” is ticked, the UI uses `conwip_wip_cap` and `enqueue_orders(..., is_replenishment=True)` for replenishment.
 
 2. **No switching cost / setup time**  
    - We plan to implement this assumption in the next iteration.
    - We do not model product changeovers or sequence-dependent setups.
-   - All jobs are treated as the same “glider” product; routing split at S₂ (to C₁/C₂/C₃) is assumed to be free apart from the processing times already specified.
+   - Multi-model (m01–m04) with model-specific BOMs; routing split at S₂ (to C₁/C₂/C₃) is deterministic per model; no setup time between models.
 
 3. **Simplified timing rule**  
-   - For each stage, all detailed activities (walking, picking, assembly, inspection, etc.) are collapsed into a single **service time** random variable:  
-     - base processing time drawn from the chosen distribution,  
-     - plus a fixed transport time,  
-     - plus an optional fixed disruption penalty (“missing bricks”).  
-   - Within a stage there is no preemption or overlapping tasks: one job is processed at a time.
+   - For each stage, service time is **constant**: effective_time = base_process_time_min / √workers + transport_time_min (no random distribution in current sim).  
+   - Within a stage there is no preemption: one job at a time; workers reduce time via √workers.
 
 4. **Batch size = 1**  
    - Every operation moves exactly **one unit** through the system (one set / glider per start–complete cycle).  
    - Buffers store individual units; there is no lot batching or partial transfer.
 
-5. **Stochastic vs deterministic environment**  
-   - By default the simulator is **stochastic**: processing times follow their specified distributions, S₂ can route jobs randomly, and disruptions occur with probability `missing_brick_prob`.  
-   - For many experiments we also run a **deterministic configuration** by:
-     - switching all time distributions to `constant`,  
-     - setting disruption probability to zero, and  
-     - optionally enabling *Deterministic routing* at S₂ in the UI.  
-   - In this mode the DES behaves as a fully deterministic flow line.
+5. **Deterministic processing**  
+   - The current simulator uses **constant** processing time per stage (effective_time = base_time / √workers); no random time distributions.  
+   - S₂ routes to C1/C2/C3 per model-specific outputs; defect/rework is the only stochastic element (if defect_rate > 0).
 
 Additional implicit assumptions:
 
-- Each stage behaves like a **single server**: at most one job in process at a time; extra workers only speed up that job (τᵢ / wᵢ).  
+- Each stage behaves like a **single server**: at most one job in process at a time; extra workers reduce time via τᵢ / √wᵢ.  
 - There is effectively infinite raw material supply before S₁; shortages only occur in modelled buffers.  
 - Buffer capacities are finite but large by default; blocking happens only when a buffer hits its explicit capacity.
 
 ---
-
-## 🚀 Next Steps
-
-1. **Improve the push system**
-   - 🔄 Batch inflow / outflow
-   - 🧩 Conceptual model refinement
-
-2. **Prepare for pull system (CONWIP / Kanban)**
-   - 🏗️ Conceptual modeling
-
-3. **Lay foundation for multi-model production**
 
 

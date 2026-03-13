@@ -1,6 +1,6 @@
 # LEGO Lean Production Simulator
 
-Discrete-event simulation (DES) for a lean LEGO production line with **Push** (demand-forecast) and **Pull** (CONWIP + Kanban) modes and multi-model production.
+Discrete-event simulation (DES) for a lean LEGO production line with **Push** (demand-forecast) and **Pull** (CONWIP + Kanban) modes and **multi-model production** (four product variants).
 
 ## Quick Start
 
@@ -11,20 +11,22 @@ streamlit run app.py
 
 Or run the CLI example: `python env.py`
 
-## Documentation
+## Documentation (where to find what)
 
-| Document | Description |
-|----------|-------------|
-| **[readme3.md](readme3.md)** | **Simulation model (current)** — system overview, Push/Pull modes, parameters, defect/rework, event logic, KPIs, configuration |
-| [mathematical_model.md](mathematical_model.md) | Mathematical model (objective, constraints, cost formulations) |
-| [MULTI_MODEL_GUIDE.md](MULTI_MODEL_GUIDE.md) | Multi-model production guide |
+| Document | Purpose | When to read |
+|----------|---------|----------------|
+| **[readme3.md](readme3.md)** | **Simulation model specification** — system overview, Push/Pull modes, event logic, parameters, KPIs, configuration, implementation mapping | Start here for how the simulator works and how it is configured. |
+| [MULTI_MODEL_GUIDE.md](MULTI_MODEL_GUIDE.md) | **Multi-model production** — model definitions, BOM configuration per stage, demand forecasting with multiple models, usage examples, troubleshooting | Use when configuring or using multiple product models (m01–m04) or integrating forecast with production. |
+| [mathematical_model.md](mathematical_model.md) | **Mathematical model** — objective function, decision variables, constraints, cost formulations | Use for the optimization/theoretical formulation behind the simulation. |
 
 ## Repo layout
 
-- **env.py** — DES engine and default `CONFIG`
-- **app.py** — Streamlit UI (mode, Order Release, CONWIP/Kanban, parameters)
-- **readme3.md** — Authoritative simulation documentation
+| File | Role |
+|------|------|
+| **env.py** | DES engine and default `CONFIG` (stages, buffers, parameters) |
+| **app.py** | Streamlit UI (Push/Pull mode, Order Release, CONWIP/Kanban, parameters) |
+| **readme3.md** | Authoritative simulation documentation (parameters, logic, KPIs) |
 
 ---
 
-*For full simulation details (parameters, event logic, KPIs, file structure), see [readme3.md](readme3.md).*
+*For full simulation details (parameters, event logic, KPIs, file structure), see [readme3.md](readme3.md). For multi-model configuration and usage, see [MULTI_MODEL_GUIDE.md](MULTI_MODEL_GUIDE.md).*

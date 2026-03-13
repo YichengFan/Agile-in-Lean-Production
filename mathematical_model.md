@@ -90,13 +90,13 @@ where:
 
 ### Service Time Model
 
-S<sub>i,j</sub> = τ<sub>i</sub> / w<sub>i</sub> + Δ<sub>i</sub> + Z<sub>i,j</sub>
+S<sub>i,j</sub> = τ<sub>i</sub> / √w<sub>i</sub> + Δ<sub>i</sub> + Z<sub>i,j</sub>
 
 where:
-- **τ<sub>i</sub>** = Base processing time per worker at stage i (sec/worker)
-- **w<sub>i</sub>** = Number of workers (affects processing speed)
-- **Δ<sub>i</sub>** = Transport time at stage i (sec, unaffected by workers)
-- **Z<sub>i,j</sub>** = Random disruption penalty (e.g., missing bricks)
+- **τ<sub>i</sub>** = Base processing time at stage i (min; current sim uses minutes)
+- **w<sub>i</sub>** = Number of workers (effective time = τ<sub>i</sub>/√w<sub>i</sub> in current sim)
+- **Δ<sub>i</sub>** = Transport time at stage i (min, unaffected by workers)
+- **Z<sub>i,j</sub>** = Random disruption penalty (e.g., missing bricks). *Current sim: no random Z; processing time is constant.*
 
 **Disruption Model:** Z<sub>i,j</sub> = M · 1{disruption occurs}
 
@@ -107,7 +107,7 @@ where:
 ### Processing Cost Constraints
 
 - **Worker availability**: w<sub>i</sub> ≤ W<sub>max,i</sub> (maximum workers per stage)
-- **Shift constraints**: Processing only occurs during shift hours α(t) ∈ {0, 1}
+- **Shift constraints** (not in current sim): Processing only during shift hours α(t) ∈ {0, 1} would apply if shift scheduling were enabled.
 - **Capacity constraints**: Throughput at stage i limited by processing capacity
 
 ---
@@ -266,10 +266,10 @@ Deterministic BOM routing: outputs are fixed item sets per stage; no probabilist
 
 ### Processing Assumptions
 
-1. **Worker independence**: Processing time scales inversely with number of workers
-2. **Transport time**: Independent of worker count
-3. **Shift constraints**: Processing only during working hours (if shifts are modeled)
-4. **Service time distributions**: Known distributions (triangular, normal, etc.)
+1. **Worker efficiency**: Processing time = base_time / √workers (deterministic in current sim).
+2. **Transport time**: Independent of worker count.
+3. **Shift constraints**: Not implemented; simulation runs 24/7.
+4. **Service time**: Current sim uses constant effective time (no random distribution).
 
 ### Demand Assumptions
 
@@ -307,21 +307,22 @@ subject to:
 ## 12. Simulation Alignment (Current Implementation)
 
 **What the current DES implements:**
-- **Push, single-product flow** with unlimited demand by default; revenue = unit_price × finished (or capped by `demand_qty` if set)
+- **Push and Pull, multi-model flow** (m01–m04); revenue = unit_price × sales_units (capped by demand); optional `demand_qty` cap
 - **Cost hooks implemented** in code:
   - Material cost per released order (`unit_material_cost`)
-  - Labor cost = busy_time × team_size × rate (`labor_costs_per_team_sec`)
-  - Inventory holding cost = ∫ inventory dt × rate (`holding_costs_per_buffer_sec`)
+  - Labor cost = busy_time × team_size × rate (`labor_costs_per_team_min`; time in minutes)
+  - Inventory holding cost = ∫ inventory dt × rate (`holding_costs_per_buffer_min`)
   - Revenue parameter (`unit_price`), optional demand cap (`demand_qty`)
-- **Single-server with faster service**: service time = τ<sub>i</sub>/w<sub>i</sub> + Δ<sub>i</sub> + Z<sub>i</sub>; parallel servers are not modeled.
+- **Single-server with worker efficiency**: service time = τ<sub>i</sub>/√w<sub>i</sub> + Δ<sub>i</sub> (constant; no random Z in current sim).
 - **Routing**: deterministic (balancing) or probabilistic, matches model constraints.
 - **Defects/rework**: q<sub>i</sub>, r(i) implemented.
 
 **Not yet implemented (future extensions):**
 - Explicit stochastic demand and lost-sales/backorder logic
 - Setup times, changeovers, learning curves
-- Multi-product BOM with differentiated material consumption
 - Price as a decision variable
+
+*(Multi-model BOM with differentiated material consumption is implemented via `required_materials_by_model`.)*
 
 ---
 
@@ -412,5 +413,5 @@ DR<sub>i</sub> = Q<sub>i,defect</sub> / Q<sub>i</sub>
 ---
 
 *Document Version: 1.0*  
-*Last Updated: 2024*
+*Last Updated: 13.03.2026*
 

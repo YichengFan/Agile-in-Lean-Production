@@ -10,9 +10,8 @@
 # - Entities: Buffer (inventory), Team (worker group), Stage (process node)
 # - Multi-input Stage support (e.g., Final Assembly needs D1 + D2 + C3)
 # - Single-output buffer OR probabilistic output routing (e.g., Set Sorting -> C1/C2/C3)
-# - Shift schedules (optional), random disruptions, defects & rework
 # - Processing time: constant (base_time / sqrt(workers) per stage)
-# - KPIs: throughput/sec, average lead time, average WIP, team utilization, finished count
+# - KPIs: throughput per time unit, average lead time, average WIP, team utilization, finished count
 # - “Click to play”: step(), run_for(dt), run_until(t_stop) and a minimal example at bottom
 #
 # IMPORTANT
@@ -89,7 +88,6 @@ class Team:
     team_id: Any
     name: str
     size: int = 1
-    shift_id: Optional[Any] = None
 
     # utilization tracking
     busy_time: float = 0.0          # accumulated busy time (simulation time units)
@@ -192,7 +190,6 @@ class LegoLeanEnv:
                 team_id=t_id,
                 name=t.get("name") or str(t_id),
                 size=int(t.get("size") or 1),
-                shift_id=t.get("shift_id")
             )
 
         # Build stages
@@ -214,9 +211,9 @@ class LegoLeanEnv:
                 required_materials_by_model=s.get("required_materials_by_model") or {},
                 output_buffers=s.get("output_buffers") or {},
                 output_buffers_by_model=s.get("output_buffers_by_model") or {},
-                base_process_time_min=float(s.get("base_process_time_min") or s.get("base_process_time_sec", 1.0) / 60.0),  # Support both old and new names, convert sec to min
-                transport_time_min=float(s.get("transport_time_min") or s.get("transport_time_sec", 0.0) / 60.0),  # Support both old and new names, convert sec to min
-                transport_time_to_outputs_min={k: float(v) / 60.0 if isinstance(v, (int, float)) else v for k, v in (s.get("transport_time_to_outputs_min") or s.get("transport_time_to_outputs_sec", {})).items()},
+                base_process_time_min=float(s.get("base_process_time_min") or s.get("base_process_time_sec", 1.0) / 60.0),  # Legacy: also accept _sec (convert to min)
+                transport_time_min=float(s.get("transport_time_min") or s.get("transport_time_sec", 0.0) / 60.0),  # Legacy: also accept _sec (convert to min)
+                transport_time_to_outputs_min={k: float(v) / 60.0 if isinstance(v, (int, float)) else v for k, v in (s.get("transport_time_to_outputs_min") or s.get("transport_time_to_outputs_sec", {})).items()},  # Legacy: _sec supported
                 defect_rate=float(s.get("defect_rate") or 0.0),
                 rework_stage_id=s.get("rework_stage_id"),
                 workers=int(s.get("workers") or 1)
@@ -225,7 +222,7 @@ class LegoLeanEnv:
         # Global parameters
         self.parameters = self.cfg.get("parameters", {})
         self.finished_buffers = list(self.parameters.get("finished_buffer_ids", ["E"]))
-        self.trace_assembly: bool = bool(self.parameters.get("trace_assembly", False))
+        self.trace_assembly: bool = bool(self.parameters.get("trace_assembly", False))  # Optional: log consumed/produced per completion to assembly_traces
         # Cost & revenue parameters (optional)
         cost_cfg = self.parameters.get("cost", {})
         self.unit_price = float(cost_cfg.get("unit_price", 0.0))
@@ -258,9 +255,9 @@ class LegoLeanEnv:
             str(k): float(v) for k, v in (cost_cfg.get("labor_costs_per_team_min") or {}).items()
         }
         self.holding_costs_per_buffer = {
-            str(k): float(v) for k, v in (cost_cfg.get("holding_costs_per_buffer_sec") or {}).items()
+            str(k): float(v) for k, v in (cost_cfg.get("holding_costs_per_buffer_min") or {}).items()
         }
-        self.demand_qty = cost_cfg.get("demand_qty")
+        self.demand_qty = cost_cfg.get("demand_qty")  # Optional: cap demand_total in get_kpis (used only if set)
         if self.demand_qty is not None:
             try:
                 self.demand_qty = int(self.demand_qty)
@@ -275,10 +272,10 @@ class LegoLeanEnv:
         # In push mode, auto-release is always enabled (forecast automatically triggers production)
         self.push_auto_release: bool = True if self.push_demand_enabled else bool(self.parameters.get("push_auto_release", False))
         self.push_demand_horizon_weeks: int = int(self.parameters.get("push_demand_horizon_weeks", 3) or 3)
-        self.push_weekly_demand_mean: float = float(self.parameters.get("push_weekly_demand_mean", 30.0))
-        self.push_forecast_noise_pct: float = float(self.parameters.get("push_forecast_noise_pct", 0.1))
-        self.push_realization_noise_pct: float = float(self.parameters.get("push_realization_noise_pct", 0.05))
-        self.push_procurement_waste_rate: float = float(self.parameters.get("push_procurement_waste_rate", 0.05))
+        self.push_weekly_demand_mean: float = float(self.parameters.get("push_weekly_demand_mean", 25.0))
+        self.push_forecast_noise_pct: float = float(self.parameters.get("push_forecast_noise_pct", 0.2))
+        self.push_realization_noise_pct: float = float(self.parameters.get("push_realization_noise_pct", 0.1))
+        self.push_procurement_waste_rate: float = float(self.parameters.get("push_procurement_waste_rate", 0.15))
         self.supplier_stage_ids: set = set()
         # Demand bookkeeping (per-model)
         self.demand_forecast: Dict[str, List[int]] = {}  # model_id -> list of weekly forecasts
@@ -304,7 +301,7 @@ class LegoLeanEnv:
         self._evt_seq = 0
         self._queue: List[Event] = []
         self.t: float = 0.0
-        #每次S2完工产生一个job_id,并且记录还有几次deliver没送完
+        # When S2 completes, one job_id is created and we track how many delivers are still pending
         # Per-output transport tracking (used when a stage schedules multiple deliveries, e.g. S2 -> C1/C2/C3)
         self._job_seq: int = 0
         self._pending_deliveries: Dict[int, Dict[str, Any]] = {}
@@ -370,7 +367,7 @@ class LegoLeanEnv:
         self._release_times = deque()
 
         # [NEW] Order Backlog for CONWIP: Stores orders that couldn't start yet due to WIP cap
-        # 用于存储因 WIP 上限而暂时无法进入生产线的订单
+        # Orders that cannot enter the line yet due to WIP cap (backlog)
         self.order_backlog = deque()
 
         # Model type tracking: map job_id to model_id
@@ -384,15 +381,12 @@ class LegoLeanEnv:
 
         # Timeline sampling
         self.timeline: List[Dict[str, Any]] = []
-        self._sample_dt: float = float(self.parameters.get("timeline_sample_dt_min", 5.0) or self.parameters.get("timeline_sample_dt_sec", 5.0) / 60.0 or 5.0)  # Support both old and new names
+        self._sample_dt: float = float(self.parameters.get("timeline_sample_dt_min", 5.0) or self.parameters.get("timeline_sample_dt_sec", 5.0) / 60.0 or 5.0)  # Legacy: _sec supported (convert to min)
         self._next_sample_t: float = self._sample_dt
         self._last_sample_finished: int = 0
         self._last_sample_time: float = 0.0
         # Assembly traces (optional)
         self.assembly_traces: List[Dict[str, Any]] = []
-
-        # Shift logic disabled - always start at t=0 for continuous production
-        # (No shift alignment needed - production runs 24/7)
 
         # KPI counters per stage
         self.stage_completed_counts: Dict[Any, int] = {s_id: 0 for s_id in self.stages}
@@ -404,9 +398,6 @@ class LegoLeanEnv:
         if self.push_demand_enabled:
             self._init_push_demand_plan()
 
-    # --------------------------------------------------------------------------
-    # Shift logic
-    # --------------------------------------------------------------------------
 
     # --------------------------------------------------------------------------
     # Event queue helpers
@@ -512,7 +503,7 @@ class LegoLeanEnv:
         self._accumulate_wip(self.t)
         self.current_wip += qty
         self.started += qty
-        # 2026-3-7[NEW] 修复 Pull 模式的材料成本：当订单正式进入产线时，扣除对应数量的材料费
+        # [NEW] Pull mode material cost: deduct material cost when order actually enters the line
         if not self.push_demand_enabled:
             self.cost_material += self.unit_material_cost * qty
 
@@ -546,9 +537,6 @@ class LegoLeanEnv:
         ev = self._pop_event()
         if ev is None:
             return None
-
-        # Shift logic disabled - process all events immediately
-        # (No shift windows - production runs continuously)
 
         # Advance simulation time
         self._on_time_advance(ev.time)
@@ -609,17 +597,16 @@ class LegoLeanEnv:
         self.current_wip = max(0, self.current_wip - qty)
 
         # [FIXED] Closed-loop CONWIP (Backlog-driven)
-        # 只有当积压池(Backlog)里有订单时，才自动释放新订单
+        # Only auto-release from backlog when there are orders in the backlog
         if self.auto_release_conwip:
             for _ in range(qty):
                 if self.order_backlog:
-                    # 从积压池头部取出一个订单
+                    # Take one order from the front of the backlog
                     next_model_id = self.order_backlog.popleft()
-                    # 释放它进入生产线 (因为刚走了一个，所以肯定有空间，不会被拒绝)
+                    # Release it into the line (one just left, so there is capacity)
                     self.enqueue_orders(1, model_id=next_model_id, is_replenishment=True)
                 else:
-                    # 积压池空了？那就停止生产。
-                    # 这修复了“无限生产/过度生产”的问题。
+                    # Backlog empty? Stop releasing. Prevents unbounded/over-production.
                     pass
 
     # --------------------------------------------------------------------------
@@ -639,7 +626,7 @@ class LegoLeanEnv:
         #2026-3-10
         throughput_per_min = self.finished / sim_time
         throughput_per_hour = throughput_per_min * 60.0
-        throughput_per_day = throughput_per_min * 480.0  # 按一天8小时算
+        throughput_per_day = throughput_per_min * 480.0  # 480 min = 8-hour day
         lead_time_avg = sum(self.lead_times) / len(self.lead_times) if self.lead_times else 0.0
         # 2026-01-21 Compute average Cycle Time as the mean time between consecutive unit completions (finished buffer entries)
         cycle_time_avg = (
@@ -731,13 +718,13 @@ class LegoLeanEnv:
         #     sales_units = min(int(self.finished), int(demand_total))
         # else:
         #     sales_units = int(self.finished)
-        # --- FIX: use per-model units when available (避免不同model互相抵消) ---
-        #2026-01-22 这里的opportunity revenue lost 和 overproduction cost 计算公式有问题改了
+        # --- FIX: use per-model units when available (avoid models cancelling out) ---
+        # Revised opportunity revenue lost and overproduction cost calculation
         produced_by_model = getattr(self, "finished_goods_by_model", {})
         realized_by_model = realized_demand_dict if isinstance(realized_demand_dict, dict) else {}
 
         if isinstance(produced_by_model, dict) and isinstance(realized_by_model, dict) and realized_by_model:
-            # 逐model计算：可卖= min(produced, demand)，缺口/过量分别累计
+            # Per-model: sales = min(produced, demand); sum unmet and overproduced separately
             sales_units = 0
             unmet_demand_units = 0
             overproduced_units = 0
@@ -761,29 +748,27 @@ class LegoLeanEnv:
 
         # Revenue based on actual sales (avoid counting overproduction as sold)
         revenue_total = float(self.unit_price) * float(sales_units)
-        # ---------- 2026-3-7全新的、更真实的 Inventory Cost 计算 ----------
-        # ---------- 修正版：完全基于商业常识的库存成本计算 ----------
+        # ---------- Inventory cost: realistic calculation ----------
+        # Based on standard business logic: WIP, excess raw, and finished-goods holding
         inventory_cost = 0.0
 
-        # 1. 流水线在制品 (WIP) 成本：这部分用真实的模拟数据 (排除A和E)
+        # 1. WIP inventory cost: use simulated buffer levels (exclude A and E)
         for b_id, area in self.buffer_time_area.items():
             if str(b_id) in ["A", "E"]:
                 continue
             h = self.holding_costs_per_buffer.get(str(b_id), 0.0)
             inventory_cost += h * area
 
-        # 2. Push 模式的惩罚一：多买的原材料吃灰
-        # 买进来的总数 (procured_qty) 减去真正卖掉的 (sales_units)，剩下的全是多余的废料
+        # 2. Push penalty (excess raw): procured_qty - sales_units = excess raw material
         if self.push_demand_enabled:
             excess_raw = max(0, self.procured_qty - sales_units)
             h_A = self.holding_costs_per_buffer.get("A")
             inventory_cost += excess_raw * sim_time * h_A
 
-        # 3. Push 模式的惩罚二：卖不出去的成品呆滞库存 (这就完全符合你的直觉了！)
-        # 只有过量生产的 (overproduced_units) 才会压在手里交高昂的仓储费
+        # 3. Push penalty (excess finished): overproduced_units incur holding cost
         h_E = self.holding_costs_per_buffer.get("E")
         if overproduced_units > 0:
-            # 假设这些滞销品平均在仓库里放了一半的模拟时间
+            # Assume overproduced units sit in warehouse for half the simulation time on average
             inventory_cost += overproduced_units * (sim_time / 2) * h_E
         # --------------------------------------------------------------------
 
@@ -983,7 +968,7 @@ class LegoLeanEnv:
 
         # Release-stage gating: release stages need an order token to start (except rework)
         # [FIXED 1/2] CHECK ONLY: Do not deduct token or pop model yet!
-        # 只检查是否有令牌，先不扣除，防止后续因缺料/阻塞退出导致令牌丢失
+        # Check token availability only; do not consume yet (avoid losing token on material/blocking failure)
         if stage.stage_id in self.release_stage_ids and (not is_rework):
             if self.stage_orders.get(stage.stage_id, 0) <= 0:
                 return
@@ -991,7 +976,7 @@ class LegoLeanEnv:
             # Peek model_id (look at the first one without removing it)
             if hasattr(self, '_stage_order_models') and stage.stage_id in self._stage_order_models:
                 if self._stage_order_models[stage.stage_id]:
-                    model_id = self._stage_order_models[stage.stage_id][0]  # <--- 只读取 [0]，不弹出
+                    model_id = self._stage_order_models[stage.stage_id][0]  # Peek [0], do not pop yet
                 else:
                     model_id = self.parameters.get("default_model_id") or "default"
             else:
@@ -1130,7 +1115,7 @@ class LegoLeanEnv:
 
         # [FIXED 2/2] COMMIT START: Now we deduct the token and pop the model
         # We only reach here if all Kanban/Material checks passed.
-        # 在正式开工、原材料已扣除、确定不会被阻塞之后，才扣除令牌
+        # Consume token only after job has started, materials pulled, and no blocking
         if stage.stage_id in self.release_stage_ids and (not is_rework):
             self.stage_orders[stage.stage_id] -= 1
             # Now actually remove the model from the queue
@@ -1311,13 +1296,13 @@ class LegoLeanEnv:
                         "model_id": model_id
                     })
 
-        # Assembly trace logging (consumed → produced)
+        # Optional assembly trace (consumed → produced); enable via parameters["trace_assembly"]=True
         if self.trace_assembly and proceed_to_output:
             consumed_summary = {}
             for _, item_id, qty in getattr(stage, "_pulled_items", []):
                 consumed_summary[item_id] = consumed_summary.get(item_id, 0) + qty
             produced_summary = {}
-            for ob_id, item_id, qty in outputs_logged if 'outputs_logged' in locals() else []:
+            for ob_id, item_id, qty in outputs_logged:
                 produced_summary.setdefault(ob_id, {})
                 produced_summary[ob_id][item_id] = produced_summary[ob_id].get(item_id, 0) + qty
             self.assembly_traces.append({
@@ -1328,7 +1313,7 @@ class LegoLeanEnv:
                 "produced": produced_summary,
             })
 
-#事件处理函数
+    # ---- Event handlers ----
     def _on_deliver(self, ev: Event):
         """Deliver transported outputs into the destination buffer after a delay."""
         stage_id = ev.payload.get("stage_id")
@@ -1490,11 +1475,11 @@ CONFIG: Dict[str, Any] = {
     # Teams (workers). One stage uses one team at a time.
     # ----------------------------------------------------------------------------
     "teams": [
-        {"team_id": "T1", "name": "Type Sorting Team",  "size": 2, "shift_id": "day"},
-        {"team_id": "T2", "name": "Set Sorting Team",   "size": 2, "shift_id": "day"},
-        {"team_id": "T3", "name": "Axis Team",          "size": 2, "shift_id": "day"},
-        {"team_id": "T4", "name": "Chassis Team",       "size": 2, "shift_id": "day"},
-        {"team_id": "T5", "name": "Final Assembly Team","size": 3, "shift_id": "day"},
+        {"team_id": "T1", "name": "Type Sorting Team",  "size": 2},
+        {"team_id": "T2", "name": "Set Sorting Team",   "size": 2},
+        {"team_id": "T3", "name": "Axis Team",          "size": 2},
+        {"team_id": "T4", "name": "Chassis Team",       "size": 2},
+        {"team_id": "T5", "name": "Final Assembly Team","size": 3},
     ],
 
     # ----------------------------------------------------------------------------
@@ -1715,14 +1700,6 @@ CONFIG: Dict[str, Any] = {
     ],
 
     # ----------------------------------------------------------------------------
-    # Shift schedule (optional). Times are minutes in a 24h day.
-    # For 3-week continuous simulation, production runs 24/7 (disabled shifts).
-    # To enable 8-hour daily shifts, uncomment the line below.
-    # ----------------------------------------------------------------------------
-    "shift_schedule": [],  # Disabled for continuous 3-week production
-    # "shift_schedule": [{"shift_id": "day", "start_minute": 8 * 60, "end_minute": 16 * 60}],  # 8-hour daily shifts
-
-    # ----------------------------------------------------------------------------
     # Model definitions (optional - for multi-model support)
     # Each model can have different material requirements at different stages
     # ----------------------------------------------------------------------------
@@ -1750,7 +1727,6 @@ CONFIG: Dict[str, Any] = {
     # ----------------------------------------------------------------------------
     "parameters": {
         "default_model_id": "m01",  # Default model if not specified
-        "target_takt_min": 10.0,  # Target takt time in minutes
         "timeline_sample_dt_min": 5.0,  # Timeline sampling interval in minutes
         "finished_buffer_ids": ["E"],
         # Model demand probability distribution (for forecast allocation)
@@ -1761,11 +1737,11 @@ CONFIG: Dict[str, Any] = {
             "m04": 0.10   # Icomat_2000X 10%
         },
         "cost": {
-            "unit_price": 10000,  # 成品售价 (例如高端 E-bike 或 精密组件)
-            "unit_material_cost": 4400,  # 单件原材料成本 (约占售价 60%)
-            "margin_per_unit": 5600,  # 边际贡献/毛利润 (1500 - 900，用于计算错失订单的机会损失)
+            "unit_price": 10000,  # Finished goods selling price
+            "unit_material_cost": 4400,  # Unit material cost 
+            "margin_per_unit": 5600,  # Contribution margin (for opportunity loss on unmet demand)
 
-            # 人工成本: 按企业实际用工成本 15 欧元/小时计算 -> 15 / 60 = 0.25 欧元/分钟
+            # Labor: 15 EUR/hour -> 15/60 = 0.25 EUR/min
             "labor_costs_per_team_min": {
                 "T1": 0.25,
                 "T2": 0.25,
@@ -1775,7 +1751,7 @@ CONFIG: Dict[str, Any] = {
             },
 
 
-            "holding_costs_per_buffer_sec": {
+            "holding_costs_per_buffer_min": {
                 "A": 0.0100,
                 "B": 0.0010,
                 "C1": 0.0130,
@@ -1785,11 +1761,11 @@ CONFIG: Dict[str, Any] = {
                 "D2": 0.4200,
                 "E": 0.7600
             },
-            "demand_qty": None  # 可选：销售数量上限
+            "demand_qty": None  # Optional: max demand quantity
         },
-        "conwip_wip_cap": 12,  # 全局 WIP 上限（先用 8~15 试，建议从 12 起步）
-        "auto_release_conwip": True,  # 成品出系统后自动补放行
-        "kanban_caps": {  # 关键缓冲 Kanban 上限（建议先只控合流相关）
+        "conwip_wip_cap": 12,  # Global WIP cap (8–15, default 12)
+        "auto_release_conwip": True,  # Auto-release one order when a unit leaves the system
+        "kanban_caps": {  # Kanban caps for key buffers (e.g. merge points)
             "C3": 4,
             "D1": 4,
             "D2": 4
@@ -1812,7 +1788,7 @@ CONFIG: Dict[str, Any] = {
 # ==============================================================================
 if __name__ == "__main__":
     # Build env with deterministic seed for reproducibility
-    env = LegoLeanEnv(CONFIG, time_unit="sec", seed=42)
+    env = LegoLeanEnv(CONFIG, time_unit="min", seed=42)
 
     # Release some orders into the system (source stage = S1)
     # Example: Release orders with model types

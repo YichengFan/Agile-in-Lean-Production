@@ -51,7 +51,7 @@ with st.sidebar:
                                    value=bool(cfg["parameters"].get("auto_release_conwip", True)))
 
         # release stages
-        # 强制锁定 S1，
+        # Force S1 as release stage
         cfg["parameters"]["release_stage_ids"] = ["S1"]
     else:
         st.markdown("### Push Planning (Demand-based)")
@@ -61,30 +61,23 @@ with st.sidebar:
         )
         weekly_mean = st.number_input(
             "Forecast weekly demand (units)",
-            min_value=0, value=int(cfg["parameters"].get("push_weekly_demand_mean", 30)), step=1,
+            min_value=0, value=int(cfg["parameters"].get("push_weekly_demand_mean", 25)), step=1,
             help="Total weekly demand (will be allocated across models based on probability distribution)"
         )
         forecast_noise_pct = st.slider(
             "Forecast noise (±%)",
-            min_value=0, max_value=50, value=int(float(cfg["parameters"].get("push_forecast_noise_pct", 0.1)) * 100),
+            min_value=0, max_value=50, value=int(float(cfg["parameters"].get("push_forecast_noise_pct", 0.2)) * 100),
             help="Noise applied to forecast generation"
         )
         real_noise_pct = st.slider(
             "Realization noise (±%)",
-            min_value=0, max_value=50, value=int(float(cfg["parameters"].get("push_realization_noise_pct", 0.05)) * 100),
+            min_value=0, max_value=50, value=int(float(cfg["parameters"].get("push_realization_noise_pct", 0.1)) * 100),
             help="Noise applied to final demand realization. Higher values create more unmet demand scenarios."
         )
         waste_pct = st.slider(
             "Procurement waste/safety stock (%)",
-            min_value=0, max_value=30, value=int(float(cfg["parameters"].get("push_procurement_waste_rate", 0.05)) * 100)
+            min_value=0, max_value=30, value=int(float(cfg["parameters"].get("push_procurement_waste_rate", 0.15)) * 100)
         )
-        # Auto-release is always enabled in push mode (forecast automatically triggers production)
-        # 2026-3-11margin_per_unit = st.number_input(
-        #     "Margin per unit",
-        #     min_value=0.0,
-        #     value=float(cfg["parameters"].get("cost", {}).get("margin_per_unit", 5600.0)),
-        #     step=100.0
-        # )
         cfg["parameters"]["push_demand_enabled"] = True
         cfg["parameters"]["push_demand_horizon_weeks"] = int(horizon_weeks)
         cfg["parameters"]["push_weekly_demand_mean"] = float(weekly_mean)
@@ -115,7 +108,7 @@ with st.sidebar:
 
     use_random_seed = st.checkbox("Use random seed", value=False)
     seed = None
-    #2026-1-3 原本是if not use ,改成if use
+    # Use release_stage_ids when provided (inverted logic)
     if use_random_seed:
         seed = st.number_input("Random seed", min_value=0, value=42, step=1)
 
@@ -163,7 +156,7 @@ with st.sidebar:
                                        for mid, qty in sorted(model_quantities.items())])
                 st.caption(f"Breakdown: {breakdown}")
 
-                #2026-3-10 自动计算并显示 Target Takt ===
+                # Calculate and show target takt (sim_time / total_orders)
                 calculated_takt = float(sim_time) / float(total_orders)
                 st.metric("Calculated Target Takt (min/unit)", f"{calculated_takt:.2f}",
                           help="Simulation Time / Total Orders")
@@ -171,7 +164,7 @@ with st.sidebar:
 
             else:
                 st.warning("⚠️ No orders specified. Please set quantity for at least one model.")
-                cfg["parameters"]["target_takt_min"] = None  # 没有订单就不算
+                cfg["parameters"]["target_takt_min"] = None  # No orders: no takt
         else:
             st.info("No model definitions found in config. Using default materials.")
             # Fallback: single quantity input for backward compatibility
@@ -184,7 +177,7 @@ with st.sidebar:
         # Push mode: section hidden; release is forecast-based. Use defaults for run options.
         model_quantities = {}
         show_logs_n = 30
-        cfg["parameters"]["target_takt_min"] = None  #2026-3-10 Push 模式下清空 Takt ===
+        cfg["parameters"]["target_takt_min"] = None  # Push mode: no target takt
 
 
 st.subheader("Global Parameters")
@@ -196,7 +189,7 @@ sample_dt = st.number_input(
     help="Interval for logging time-series data to charts"
 )
 cfg["parameters"]["timeline_sample_dt_min"] = float(sample_dt)
-# --- 新增：全局财务参数 ---
+# --- Global financial parameters ---
 st.markdown("**Financial Parameters**")
 f1, f2 = st.columns(2)
 with f1:
@@ -216,11 +209,11 @@ with f2:
         help="Material cost per unit"
     )
 
-# 自动计算 Margin 并在界面上提示
+# Auto-compute margin and show in UI
 calculated_margin = max(0.0, float(unit_price) - float(unit_material_cost))
 st.info(f"💡 Calculated Margin per unit: **{calculated_margin:.2f}**")
 
-# 写入全局配置
+# Write to global config
 cfg["parameters"].setdefault("cost", {})
 cfg["parameters"]["cost"]["unit_price"] = float(unit_price)
 cfg["parameters"]["cost"]["unit_material_cost"] = float(unit_material_cost)
@@ -251,25 +244,23 @@ if enable_pull:
         cfg["parameters"]["auto_release_conwip"] = bool(auto_release)
 
     with p3:
-        # --- 开始替换 ---
-
-        # 1. 注入 CSS：彻底隐藏所有图标，并禁止鼠标点击
+        # Inject CSS to hide multiselect icons and lock release stage to S1
         st.markdown(
             """
             <style>
-            /* 针对 Release Stage 区域：禁止鼠标交互 */
+            /* Release stage area: disable mouse interaction */
             div[data-testid="stMultiSelect"] {
                 pointer-events: none;
             }
-            /* 隐藏所有 SVG 图标（叉号、下拉箭头） */
+            /* Hide all SVG icons (clear, dropdown) */
             div[data-testid="stMultiSelect"] svg {
                 display: none !important;
             }
-            /* 隐藏输入框，防止出现光标 */
+            /* Hide input to prevent focus/cursor */
             div[data-testid="stMultiSelect"] input {
                 display: none !important;
             }
-            /* 隐藏右侧的下拉点击区域 */
+            /* Hide dropdown click area */
             div[data-testid="stMultiSelect"] div[role="button"] {
                 display: none !important;
             }
@@ -440,7 +431,7 @@ if st.button("Run Simulation"):
         cfg["parameters"]["release_stage_ids"] = release_stage_ids
         cfg["parameters"]["conwip_wip_cap"] = int(conwip_cap) if int(conwip_cap) > 0 else None
         cfg["parameters"]["auto_release_conwip"] = bool(auto_release)
-        # 改为引用主面板定义的 cap_c3, cap_d1, cap_d2
+        # Use cap_c3, cap_d1, cap_d2 from main panel
         cfg["parameters"]["kanban_caps"] = {"C3": int(cap_c3), "D1": int(cap_d1), "D2": int(cap_d2)}
     else:
         # Push: keep demand-based settings already written in the sidebar
@@ -485,7 +476,7 @@ if st.button("Run Simulation"):
         else:
             st.warning("⚠️ Push mode enabled but no orders scheduled. Check forecast parameters.")
 
-    #2026-01-01 存疑，如果是push的话enqueue激活就够了，这样是否会反复激活S1？
+    # Kick try_start for all stages (push: enqueue at init; pull: user release)
     # Kick off: try starting all stages once
     for s in env.stages.values():
         env._push_event(env.t, "try_start", {"stage_id": s.stage_id})
@@ -579,7 +570,7 @@ if st.button("Run Simulation"):
     raw_takt = cfg["parameters"].get("target_takt_min")
     actual_cycle = float(kpis.get("cycle_time_avg_min", 0.0))
 
-    # 如果有 Target Takt (Pull 模式)
+    # If target takt is set (Pull mode)
     if raw_takt is not None:
         takt_target = float(raw_takt)
         delta_val = takt_target - actual_cycle
@@ -603,7 +594,7 @@ if st.button("Run Simulation"):
                 st.success(
                     "✅ **Takt Time meet!**")
 
-    # 如果没有 Target Takt (Push 模式)
+    # If no target takt (Push mode)
     else:
         c1, c2 = st.columns([1, 3])
         with c1:
@@ -625,19 +616,19 @@ if st.button("Run Simulation"):
     with f1:
         st.markdown("**Cost Breakdown (Lean Perspective)**")
 
-        # 获取基础数据
+        # Get base cost data
         total_mat = kpis.get('cost_material', 0)
         total_lab = kpis.get('cost_labor', 0)
         inv_holding = kpis.get('cost_inventory', 0)
         waste_cost = kpis.get('overproduction_waste_cost', 0)
 
-        # 在精益视角下，把白白浪费的材料和人工从“有效成本”里剔除出来，单独展示
-        # 先算出当前模拟下，真实的材料和人工比例
+        # Lean view: separate waste (material + labor) from effective cost
+        # Compute actual material vs labor ratio from this run
         total_base_cost = total_mat + total_lab
-        mat_ratio = total_mat / total_base_cost  # 如果材料占大头，算出来可能是 0.791
-        lab_ratio = total_lab / total_base_cost  # 算出来可能是 0.209
+        mat_ratio = total_mat / total_base_cost
+        lab_ratio = total_lab / total_base_cost
 
-        # 然后再用真实的比例去扣除
+        # Allocate waste by these ratios
         effective_mat = max(0, total_mat - (waste_cost * mat_ratio))
         effective_lab = max(0, total_lab - (waste_cost * lab_ratio))
 
@@ -661,7 +652,7 @@ if st.button("Run Simulation"):
         try:
             import plotly.express as px
 
-            # 给浪费分配一个醒目的红色
+            # Use red for waste
             color_discrete_map = {
                 "Material Cost of Good Sold": "#1f77b4",
                 "Labor Cost": "#9edae5",
@@ -672,7 +663,7 @@ if st.button("Run Simulation"):
                              color='Category', color_discrete_map=color_discrete_map)
             fig_pie.update_traces(textposition='auto', textinfo='percent')
 
-            # 把图例放到下面以免挤占空间
+            # Legend below to save space
             fig_pie.update_layout(
                 margin=dict(t=20, b=20, l=20, r=20),
                 legend=dict(orientation="h", yanchor="bottom", y=-0.5, xanchor="center", x=0.5)
