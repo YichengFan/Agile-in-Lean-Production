@@ -135,7 +135,6 @@ These metrics are calculated for diagnostic purposes and are not added to $C$ to
 **1. Opportunity Loss (Unmet Demand):**
 $$C_{opp\_loss} = margin \cdot \sum_{v \in V} \max(0, D_v - Q_{sales,v})$$
 - Represents profit left on the table due to unmet demand. $margin = p - c_m$.
-
 **2. Overproduction Waste Cost:**
 $$C_{\text{over waste}} = (c_m + \text{avg labor per unit}) \cdot \sum_{v \in V} \max(0, Q_{\text{produced},v} - D_v)$$
 ---
