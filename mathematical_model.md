@@ -126,8 +126,6 @@ $$\bar{X}_b(T) = \frac{1}{T} \int_0^T X_b(t) dt$$
 
 ### Defect and Quality Costs (Implicit)
 
-*Note: Defect costs are handled implicitly within the DES. Scrapped items consume material costs ($C_{material}$) and labor time ($T$) without generating revenue ($R$). Therefore, they naturally penalize the objective function $\Pi$ without needing a separate additive defect penalty.*
-
 ### Financial Diagnostics
 
 These metrics are calculated for diagnostic purposes and are not added to $C$ to avoid double-counting.
