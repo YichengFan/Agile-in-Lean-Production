@@ -137,8 +137,7 @@ $$C_{opp\_loss} = margin \cdot \sum_{v \in V} \max(0, D_v - Q_{sales,v})$$
 - Represents profit left on the table due to unmet demand. $margin = p - c_m$.
 
 **2. Overproduction Waste Cost:**
-$$C_{over\_waste} = (c_m + \text{avg\_labor\_per\_unit}) \cdot \sum_{v \in V} \max(0, Q_{produced,v} - D_v)$$
-
+$$C_{\text{over waste}} = (c_m + \text{avg labor per unit}) \cdot \sum_{v \in V} \max(0, Q_{\text{produced},v} - D_v)$$
 ---
 
 ## 7. Decision Variables
