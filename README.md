@@ -26,6 +26,9 @@ Or run the CLI example: `python env.py`
 | **env.py** | DES engine and default `CONFIG` (stages, buffers, parameters) |
 | **app.py** | Streamlit UI (Push/Pull mode, Order Release, CONWIP/Kanban, parameters) |
 | **simulation_overview.md** | Authoritative simulation documentation (parameters, logic, KPIs) |
+| **MULTI_MODEL_GUIDE.md** | Explains how the system handles the mixed-model production of various LEGO sets (m01-m04) |
+| **mathematical_model.md** | Details the math and operations research logic behind the simulation code |
+| **requirements.txt** | Python Dependencies. Lists the external libraries required to run the project |
 
 ---
 
