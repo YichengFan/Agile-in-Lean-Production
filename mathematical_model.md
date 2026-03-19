@@ -167,10 +167,16 @@ $$C_{\text{over waste}} = (c_m + \text{avg labor per unit}) \cdot \sum_{v \in V}
 
 ### Material Flow Constraints
 
-**Conservation of flow:** $$\sum_{b \in inputs(i)} \lambda_{b,out} = \sum_{b \in outputs(i)} \lambda_{b,in} = \theta_i$$
+**Conservation of flow (Input consumption):**
+$$\lambda_{b, out} = m_{b, i} \cdot \theta_i \quad \forall b \in inputs(i)$$
+*(Where $m_{b, i}$ is the BOM quantity of material from buffer $b$ required for one unit of production at stage $i$.)*
 
-**Multi-input synchronization (for S5):** $\lambda_{D1,out} = \lambda_{D2,out} = \lambda_{C3,out} = \theta_5$
+**Conservation of flow (Output generation):**
+$$\lambda_{b, in} = \theta_i \quad \forall b \in outputs(i)$$
+*(Assuming each stage operation yields one unit of output for its respective downstream buffers. If yields differ, apply an output multiplier here.)*
 
+**Multi-input synchronization (for S5):**
+$$\frac{\lambda_{D1, out}}{m_{D1, 5}} = \frac{\lambda_{D2, out}}{m_{D2, 5}} = \frac{\lambda_{C3, out}}{m_{C3, 5}} = \theta_5$$
 ### Inventory & Pull Constraints
 
 **Buffer capacity:** $0 \le X_b(t) \le cap_b$ for all $t$  
