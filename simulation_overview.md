@@ -60,7 +60,7 @@ This document focuses on the **simulation model** implementation details and cur
 13. [File Structure](#14-file-structure)  
 14. [Getting Help](#15-getting-help)  
 15. [Validation Targets](#16-validation-targets)
-
+16. [Reference](#16-reference)  
 ---
 
 # Simulation Model (Discrete-Event Simulation)
@@ -634,6 +634,38 @@ Agile-in-Lean-Production/
 - **Utilization**: ρ<sub>i</sub> < 0.85 for all stages (avoid bottlenecks)
 - **Demand matching**: Minimize unmet demand and overproduction
 - **Cost accuracy**: Material, labor, and inventory costs should match actual consumption
+
+---
+
+## 16) Reference
+
+Banks, J., & Carson, J. S.. (1986). Discrete-event system simulation. Prentice-Hall.
+
+Hopp, W. J., & Spearman, M. L. (2011). Factory physics (3rd ed.). Waveland Press.
+
+Law, A. M. (2015).Simulation modeling and analysis (5th ed.). McGraw-Hill Education.
+
+Varian, H. R. (2014). Intermediate microeconomics: A modern approach (9th ed.). W. W. Norton & Company.
+
+Silver, E. A., Pyke, D. F., & Thomas, D. J. (2016). Inventory and production management in supply chains (4th ed.). CRC Press.
+
+Cachon, G. P., & Terwiesch, C. (2019). Matching supply with demand: An introduction to operations management (4th ed.). McGraw-Hill.
+
+Spearman, M. L., Woodruff, D. L., & Hopp, W. J. (1990). CONWIP: A pull alternative to kanban. International Journal of Production Research, 28(5), 879–894. https://doi.org/10.1080/00207549008942761
+
+Lu, Y. (2020). Digital twin-driven smart manufacturing: Connotation, reference model, applications and research issues. Robotics and Computer-Integrated Manufacturing, 61, 101837. https://doi.org/10.1016/j.rcim.2019.101837
+
+Alexopoulos, C., & Kim, S.-H. (2002). Output data analysis for simulations. In E. Yücesan, C.-H. Chen, J. L. Snowdon, & J. M. Charnes (Eds.), Proceedings of the 2002 Winter Simulation Conference (pp. 18–25). https://doi.org/10.1109/WSC.2002.1172872 
+
+Katsigiannis, M., Pantelidakis, M., & Mykoniatis, K. (2023). Assessing the transition from mass production to lean manufacturing using a hybrid simulation model of a LEGO® automotive assembly line. https://doi.org/10.1108/IJLSS-07-2022-0165 
+
+Lugaresi, G., & Matta, A. (2019). A LEGO-based manufacturing demonstration system for real-time decision making. In N. Mustafee, A. S. G. Bae, S. Lazarova-Molnar, M. Rabe, C. Szabo, & P. Haas (Eds.), Proceedings of the 2019 Winter Simulation Conference (pp.1284–1295). https://doi.org/10.1109/WSC40007.2019.9004733 
+
+ Leal, F., Martins, P. C., Torres, A. F., de Queiroz, J. A., & Montevechi, J. A. B. (2017). Learning lean with lego: developing and evaluating the efficacy of a serious game. Production, 27(spe), Article e20162227. https://doi.org/10.1590/0103-6513.222716
+
+Hopp, W. J., & Spearman, M. L. (2004). To pull or not to pull: What is the question?. Manufacturing & Service Operations Management, 6(2), 133-148.https://doi.org/10.1287/msom.1030.0028 
+
+
 
 ---
 
